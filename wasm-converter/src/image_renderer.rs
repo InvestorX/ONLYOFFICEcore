@@ -237,8 +237,9 @@ fn render_line_to_pixels(
     let end_y = y2 as i64;
 
     // Limit iterations to avoid infinite loops on huge coordinates
-    let max_iter = (dx.abs() + dy.abs() + 2) as usize;
-    for _ in 0..max_iter.min(100000) {
+    const MAX_LINE_ITERATIONS: usize = 100_000;
+    let max_iter = (dx.unsigned_abs() + dy.unsigned_abs() + 2) as usize;
+    for _ in 0..max_iter.min(MAX_LINE_ITERATIONS) {
         if x >= 0 && y >= 0 && (x as u32) < img_width && (y as u32) < img_height {
             set_pixel(pixels, img_width, x as u32, y as u32, color);
         }

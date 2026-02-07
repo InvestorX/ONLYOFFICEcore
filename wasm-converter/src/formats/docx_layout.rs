@@ -748,7 +748,7 @@ fn resolve_images(
                                             content: RunContent::ImageData {
                                                 data,
                                                 mime_type: mime.to_string(),
-                                                width: 200.0, // Default; EMU parsed above
+                                                width: 200.0, // Default size; TODO: use parsed EMU dimensions
                                                 height: 150.0,
                                             },
                                             ..run.clone()
@@ -858,12 +858,10 @@ fn layout_pages(elements: &[BodyElement], setup: &PageSetup) -> Vec<Page> {
                 }
 
                 // Render paragraph runs
-                let _abs_y = setup.margin_top + cur_y;
                 let abs_x = setup.margin_left + para.indent_left;
 
                 // Concatenate all text runs for this line, respecting formatting
                 let mut line_x = abs_x + para.indent_first.max(0.0);
-                let mut _first_line = true;
 
                 for run in &para.runs {
                     match &run.content {
@@ -921,7 +919,6 @@ fn layout_pages(elements: &[BodyElement], setup: &PageSetup) -> Vec<Page> {
                                 if li < lines.len() - 1 {
                                     cur_y += line_height;
                                     line_x = abs_x;
-                                    _first_line = false;
                                 } else {
                                     // Update x position for next inline run
                                     line_x += estimate_text_width(line_text, font_size);
