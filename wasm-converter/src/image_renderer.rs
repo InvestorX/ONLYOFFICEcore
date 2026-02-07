@@ -225,32 +225,34 @@ fn render_line_to_pixels(
     _width: f64,
     color: &Color,
 ) {
-    let mut x = x1 as i32;
-    let mut y = y1 as i32;
-    let dx = ((x2 - x1) as i32).abs();
-    let dy = -((y2 - y1) as i32).abs();
-    let sx = if x1 < x2 { 1 } else { -1 };
-    let sy = if y1 < y2 { 1 } else { -1 };
+    let mut x = x1 as i64;
+    let mut y = y1 as i64;
+    let dx = ((x2 - x1) as i64).abs();
+    let dy = -((y2 - y1) as i64).abs();
+    let sx: i64 = if x1 < x2 { 1 } else { -1 };
+    let sy: i64 = if y1 < y2 { 1 } else { -1 };
     let mut err = dx + dy;
 
-    let end_x = x2 as i32;
-    let end_y = y2 as i32;
+    let end_x = x2 as i64;
+    let end_y = y2 as i64;
 
-    loop {
+    // Limit iterations to avoid infinite loops on huge coordinates
+    let max_iter = (dx.abs() + dy.abs() + 2) as usize;
+    for _ in 0..max_iter.min(100000) {
         if x >= 0 && y >= 0 && (x as u32) < img_width && (y as u32) < img_height {
             set_pixel(pixels, img_width, x as u32, y as u32, color);
         }
         if x == end_x && y == end_y {
             break;
         }
-        let e2 = 2 * err;
+        let e2 = 2i64.saturating_mul(err);
         if e2 >= dy {
-            err += dy;
-            x += sx;
+            err = err.saturating_add(dy);
+            x = x.saturating_add(sx);
         }
         if e2 <= dx {
-            err += dx;
-            y += sy;
+            err = err.saturating_add(dx);
+            y = y.saturating_add(sy);
         }
     }
 }

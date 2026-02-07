@@ -41,7 +41,7 @@ pub trait DocumentConverter {
 }
 
 /// 色表現 (RGBA)
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Color {
     pub r: u8,
     pub g: u8,

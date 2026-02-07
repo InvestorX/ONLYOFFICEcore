@@ -619,3 +619,53 @@ fn test_sample_xlsx_to_pdf_with_calamine() {
     f.write_all(&pdf).unwrap();
     eprintln!("✅ XLSX→PDF出力: {} ({} bytes, {}ページ)", out_path, pdf.len(), doc.pages.len());
 }
+
+/// Sample_12.pptxでのレイアウト保持変換テスト
+/// (ファイルが存在しない場合はスキップ)
+#[test]
+fn test_real_sample12_pptx_layout() {
+    use std::io::Write;
+
+    let pptx_path = "/tmp/Sample_12.pptx";
+    let data = match std::fs::read(pptx_path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("⏭ {}: ファイルが見つからないためスキップ", pptx_path);
+            return;
+        }
+    };
+
+    eprintln!("入力: {} bytes", data.len());
+
+    let doc = formats::convert_by_extension("pptx", &data).expect("PPTX変換に失敗");
+
+    eprintln!("スライド数: {}", doc.pages.len());
+    for (i, page) in doc.pages.iter().enumerate() {
+        eprintln!(
+            "  スライド {}: {}x{} ({} 要素)",
+            i + 1,
+            page.width as i32,
+            page.height as i32,
+            page.elements.len()
+        );
+    }
+
+    assert!(doc.pages.len() >= 10, "12スライドあるはず（実際: {}）", doc.pages.len());
+
+    // PDF出力
+    let pdf = pdf_writer::render_to_pdf(&doc);
+    assert!(pdf.starts_with(b"%PDF-1.4"));
+    let pdf_path = "/tmp/wasm_converter_sample12.pdf";
+    let mut f = std::fs::File::create(pdf_path).unwrap();
+    f.write_all(&pdf).unwrap();
+    eprintln!("✅ PDF出力: {} ({} bytes)", pdf_path, pdf.len());
+
+    // 画像ZIP出力
+    let fm = FontManager::new();
+    let zip_data = image_renderer::render_to_images_zip(&doc, &fm);
+    assert!(zip_data.starts_with(b"PK"));
+    let zip_path = "/tmp/wasm_converter_sample12_pages.zip";
+    let mut f = std::fs::File::create(zip_path).unwrap();
+    f.write_all(&zip_data).unwrap();
+    eprintln!("✅ 画像ZIP出力: {} ({} bytes)", zip_path, zip_data.len());
+}

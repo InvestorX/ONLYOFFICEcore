@@ -9,14 +9,14 @@ Rust + WebAssembly で構築されたドキュメント変換ツールです。�
 | テキスト | .txt | ✅ 完全対応 |
 | CSV | .csv | ✅ 完全対応 |
 | RTF | .rtf | ✅ テキスト抽出 |
-| Microsoft Word | .docx | ✅ テキスト抽出 |
+| Microsoft Word | .docx | ✅ レイアウト保持（書式・テーブル・画像対応） |
 | Microsoft Word (旧) | .doc | 🔧 開発中 |
 | OpenDocument Text | .odt | 🔧 開発中 |
 | EPUB | .epub | 🔧 開発中 |
 | XPS | .xps | 🔧 開発中 |
 | DjVu | .djvu | 🔧 開発中 |
 | Microsoft Excel | .xlsx, .xls, .ods | ✅ テーブル表示 |
-| Microsoft PowerPoint | .pptx | ✅ テキスト抽出 |
+| Microsoft PowerPoint | .pptx | ✅ レイアウト保持（シェイプ位置・書式・画像対応） |
 | Microsoft PowerPoint (旧) | .ppt | 🔧 開発中 |
 | OpenDocument Presentation | .odp | 🔧 開発中 |
 
