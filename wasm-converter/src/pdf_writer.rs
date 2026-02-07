@@ -462,7 +462,8 @@ impl PdfWriter {
         }
 
         // Approximate with thin horizontal/vertical strips
-        let num_strips = 50u32;
+        const GRADIENT_STRIP_COUNT: u32 = 50;
+        let num_strips = GRADIENT_STRIP_COUNT;
         let strip_height = h / num_strips as f64;
 
         for i in 0..num_strips {

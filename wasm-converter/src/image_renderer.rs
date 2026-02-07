@@ -623,12 +623,15 @@ fn blit_decoded_image(
                 let dst_idx = ((py * img_width + px) * 4) as usize;
                 if src_idx + 3 < src.pixels.len() && dst_idx + 3 < pixels.len() {
                     let src_a = src.pixels[src_idx + 3] as f64 / 255.0;
-                    if src_a > 0.99 {
+                    // Thresholds for fast-path (fully opaque) and skip (fully transparent)
+                    const ALPHA_OPAQUE_THRESHOLD: f64 = 0.99;
+                    const ALPHA_TRANSPARENT_THRESHOLD: f64 = 0.01;
+                    if src_a > ALPHA_OPAQUE_THRESHOLD {
                         pixels[dst_idx] = src.pixels[src_idx];
                         pixels[dst_idx + 1] = src.pixels[src_idx + 1];
                         pixels[dst_idx + 2] = src.pixels[src_idx + 2];
                         pixels[dst_idx + 3] = 255;
-                    } else if src_a > 0.01 {
+                    } else if src_a > ALPHA_TRANSPARENT_THRESHOLD {
                         pixels[dst_idx] = (pixels[dst_idx] as f64 * (1.0 - src_a)
                             + src.pixels[src_idx] as f64 * src_a)
                             as u8;
