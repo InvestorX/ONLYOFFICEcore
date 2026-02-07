@@ -116,7 +116,11 @@ pub fn render_page_to_image(
     encode_png(&pixels, width, height)
 }
 
-/// テキストをピクセルバッファに描画（簡易実装）
+/// テキストをピクセルバッファに描画
+/// 注意: これは簡易実装であり、実際のグリフラスタライズではなく
+/// 各文字を矩形ブロックとして描画します。完全な実装では
+/// ab_glyph等のフォントラスタライザーを使用して
+/// 正確なグリフ形状をレンダリングする必要があります。
 fn render_text_to_pixels(
     pixels: &mut [u8],
     img_width: u32,

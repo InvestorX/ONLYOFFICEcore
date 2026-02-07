@@ -10,16 +10,15 @@ use crate::converter::{
 /// スタブコンバーター
 /// まだ完全に実装されていないフォーマット用のプレースホルダーです。
 pub struct StubConverter {
-    format_name: String,
-    #[allow(dead_code)]
-    extensions: Vec<String>,
+    format_name: &'static str,
+    extensions: &'static [&'static str],
 }
 
 impl StubConverter {
-    pub fn new(format_name: &str, extensions: &[&str]) -> Self {
+    pub fn new(format_name: &'static str, extensions: &'static [&'static str]) -> Self {
         Self {
-            format_name: format_name.to_string(),
-            extensions: extensions.iter().map(|e| e.to_string()).collect(),
+            format_name,
+            extensions,
         }
     }
 }
@@ -126,12 +125,11 @@ impl DocumentConverter for StubConverter {
     }
 
     fn supported_extensions(&self) -> &[&str] {
-        // この関数のライフタイムの関係で空スライスを返す
-        &[]
+        self.extensions
     }
 
     fn format_name(&self) -> &str {
-        &self.format_name
+        self.format_name
     }
 }
 

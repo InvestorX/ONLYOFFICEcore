@@ -73,7 +73,7 @@ impl WasmConverter {
             ))
         })?;
 
-        let doc = formats::convert_by_extension(ext, data).map_err(|e| JsValue::from_str(&e.message))?;
+        let doc = formats::convert_by_extension(ext, data).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(pdf_writer::render_to_pdf(&doc))
     }
@@ -97,7 +97,7 @@ impl WasmConverter {
             ))
         })?;
 
-        let doc = formats::convert_by_extension(ext, data).map_err(|e| JsValue::from_str(&e.message))?;
+        let doc = formats::convert_by_extension(ext, data).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let mut config = image_renderer::ImageRenderConfig::default();
         if let Some(d) = dpi {
@@ -124,7 +124,7 @@ impl WasmConverter {
             ))
         })?;
 
-        let doc = formats::convert_by_extension(ext, data).map_err(|e| JsValue::from_str(&e.message))?;
+        let doc = formats::convert_by_extension(ext, data).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         serde_json::to_string_pretty(&doc)
             .map_err(|e| JsValue::from_str(&format!("JSONシリアライズエラー: {}", e)))

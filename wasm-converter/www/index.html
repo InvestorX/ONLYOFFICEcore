@@ -313,7 +313,7 @@
                 showStatus(`初期化完了: ${version}`, 'success');
             } catch (e) {
                 console.error('WASM initialization failed:', e);
-                showStatus('WASMモジュールの読み込みに失敗しました。wasm-packでビルドしてください。', 'error');
+                showStatus('WASMモジュールの読み込みに失敗しました。「./build.sh build」を実行してビルドしてください。', 'error');
             }
         }
 
