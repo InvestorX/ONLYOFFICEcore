@@ -120,3 +120,147 @@ fn test_japanese_text_in_pdf() {
     let pdf_str = String::from_utf8_lossy(&pdf);
     assert!(pdf_str.contains("%%EOF"));
 }
+
+/// サンプルTXTファイルをPDFに変換し、出力ファイルを検証するテスト
+#[test]
+fn test_sample_txt_file_to_pdf_output() {
+    use std::io::Write;
+
+    // サンプル日本語テキストファイルを作成
+    let sample_text = "\
+WASM ドキュメントコンバーター テストファイル
+========================================
+
+このファイルは、Rust + WebAssembly ドキュメントコンバーターの
+動作確認用サンプルファイルです。
+
+日本語テスト：
+  漢字：東京都渋谷区
+  ひらがな：こんにちは
+  カタカナ：コンバーター
+  英数字混在：2026年2月7日 Release v0.1.0
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+
+--- テスト完了 ---
+";
+
+    // TXT → Document → PDF パイプライン
+    let doc = formats::convert_by_extension("txt", sample_text.as_bytes()).unwrap();
+    assert!(!doc.pages.is_empty(), "ドキュメントにページがありません");
+
+    let pdf = pdf_writer::render_to_pdf(&doc);
+    assert!(pdf.starts_with(b"%PDF-1.4"), "PDFヘッダーが不正です");
+    assert!(pdf.len() > 500, "PDFファイルが小さすぎます: {} bytes", pdf.len());
+
+    // PDFの構造を検証
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(pdf_str.contains("%%EOF"), "PDFにEOFマーカーがありません");
+    assert!(pdf_str.contains("/Type /Catalog"), "PDFにカタログがありません");
+    assert!(pdf_str.contains("/Type /Page"), "PDFにページがありません");
+    assert!(pdf_str.contains("xref"), "PDFに相互参照テーブルがありません");
+    assert!(pdf_str.contains("trailer"), "PDFにトレーラーがありません");
+
+    // 出力ファイルを/tmpに保存して確認可能にする
+    let out_path = "/tmp/wasm_converter_test_output.pdf";
+    let mut f = std::fs::File::create(out_path).unwrap();
+    f.write_all(&pdf).unwrap();
+    eprintln!("✅ サンプルPDF出力: {} ({} bytes)", out_path, pdf.len());
+}
+
+/// サンプルCSVファイルをPDFに変換し、出力ファイルを検証するテスト
+#[test]
+fn test_sample_csv_file_to_pdf_output() {
+    use std::io::Write;
+
+    let sample_csv = "\
+名前,年齢,都市,スコア
+田中太郎,30,東京,95
+佐藤花子,25,大阪,88
+鈴木一郎,35,名古屋,92
+高橋美咲,28,福岡,97
+伊藤健太,32,札幌,85
+";
+
+    let doc = formats::convert_by_extension("csv", sample_csv.as_bytes()).unwrap();
+    assert!(!doc.pages.is_empty());
+
+    let pdf = pdf_writer::render_to_pdf(&doc);
+    assert!(pdf.starts_with(b"%PDF-1.4"));
+    assert!(pdf.len() > 500);
+
+    let out_path = "/tmp/wasm_converter_test_csv.pdf";
+    let mut f = std::fs::File::create(out_path).unwrap();
+    f.write_all(&pdf).unwrap();
+    eprintln!("✅ サンプルCSV→PDF出力: {} ({} bytes)", out_path, pdf.len());
+}
+
+/// サンプルRTFファイルをPDFに変換するテスト
+#[test]
+fn test_sample_rtf_file_to_pdf_output() {
+    use std::io::Write;
+
+    let sample_rtf = r#"{\rtf1\ansi\deff0
+{\fonttbl{\f0 Times New Roman;}}
+\f0\fs24
+This is a sample RTF document.\par
+It contains multiple paragraphs.\par
+\par
+{\b Bold text} and {\i italic text} are supported.\par
+Numbers: 1, 2, 3, 4, 5\par
+}"#;
+
+    let doc = formats::convert_by_extension("rtf", sample_rtf.as_bytes()).unwrap();
+    assert!(!doc.pages.is_empty());
+
+    let pdf = pdf_writer::render_to_pdf(&doc);
+    assert!(pdf.starts_with(b"%PDF-1.4"));
+
+    let out_path = "/tmp/wasm_converter_test_rtf.pdf";
+    let mut f = std::fs::File::create(out_path).unwrap();
+    f.write_all(&pdf).unwrap();
+    eprintln!("✅ サンプルRTF→PDF出力: {} ({} bytes)", out_path, pdf.len());
+}
+
+/// サンプルTXTファイルを画像ZIPに変換するテスト
+#[test]
+fn test_sample_txt_to_images_zip_output() {
+    use std::io::Write;
+
+    let sample_text = "画像変換テスト\n\nページ1: こんにちは世界\nRust + WebAssembly";
+
+    let doc = formats::convert_by_extension("txt", sample_text.as_bytes()).unwrap();
+    let font_manager = FontManager::new();
+    let zip_data = image_renderer::render_to_images_zip(&doc, &font_manager);
+
+    assert!(zip_data.starts_with(b"PK"), "ZIPヘッダーが不正です");
+    assert!(zip_data.len() > 100);
+
+    // ZIPの中身を検証
+    let cursor = std::io::Cursor::new(&zip_data);
+    let archive = zip::ZipArchive::new(cursor).unwrap();
+    assert!(archive.len() > 0, "ZIPにファイルがありません");
+    eprintln!("✅ ZIP内のページ画像数: {}", archive.len());
+
+    let out_path = "/tmp/wasm_converter_test_pages.zip";
+    let mut f = std::fs::File::create(out_path).unwrap();
+    f.write_all(&zip_data).unwrap();
+    eprintln!("✅ サンプル画像ZIP出力: {} ({} bytes)", out_path, zip_data.len());
+}
+
+/// LINE Seed JPフォントの管理テスト
+#[test]
+fn test_line_seed_jp_font_manager() {
+    let mut fm = FontManager::new();
+
+    // 外部フォントとしてLINE Seed JPを追加
+    fm.add_font("LINESeedJP-Regular".to_string(), vec![0; 100]);
+
+    let fonts = fm.available_fonts();
+    assert!(fonts.contains(&"LINESeedJP-Regular".to_string()));
+
+    // フォント名でのルックアップが動作すること
+    assert!(fm.get_font_data("LINESeedJP-Regular").is_some());
+    assert!(fm.get_font_data("LINE Seed").is_none()); // 外部フォントは厳密マッチ
+}

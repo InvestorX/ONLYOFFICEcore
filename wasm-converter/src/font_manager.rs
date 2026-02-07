@@ -1,6 +1,6 @@
 // font_manager.rs - フォント管理モジュール
 //
-// 日本語フォント（Noto Sans JP）を含むフォントの読み込みと管理を行います。
+// 日本語フォント（Noto Sans JP, LINE Seed JP）を含むフォントの読み込みと管理を行います。
 // WebAssemblyバイナリにフォントデータを内包します。
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
@@ -14,6 +14,14 @@ const NOTO_SANS_JP_REGULAR: &[u8] = include_bytes!("../fonts/NotoSansJP-Regular.
 /// フォントが内蔵されていない場合のフォールバック
 #[cfg(not(feature = "embed-fonts"))]
 const NOTO_SANS_JP_REGULAR: &[u8] = &[];
+
+/// 内蔵フォント：LINE Seed JP Regular
+#[cfg(feature = "embed-fonts")]
+const LINE_SEED_JP_REGULAR: &[u8] = include_bytes!("../fonts/LINESeedJP-Regular.ttf");
+
+/// LINE Seed JP が内蔵されていない場合のフォールバック
+#[cfg(not(feature = "embed-fonts"))]
+const LINE_SEED_JP_REGULAR: &[u8] = &[];
 
 /// フォントマネージャー
 /// 利用可能なフォントの管理とフォントデータへのアクセスを提供します。
@@ -36,15 +44,26 @@ impl FontManager {
 
     /// 内蔵日本語フォントが利用可能かどうか
     pub fn has_builtin_japanese_font(&self) -> bool {
-        !NOTO_SANS_JP_REGULAR.is_empty()
+        !NOTO_SANS_JP_REGULAR.is_empty() || !LINE_SEED_JP_REGULAR.is_empty()
     }
 
-    /// 内蔵日本語フォントデータを取得
+    /// 内蔵日本語フォントデータを取得（Noto Sans JP優先）
     pub fn builtin_japanese_font(&self) -> Option<&'static [u8]> {
-        if NOTO_SANS_JP_REGULAR.is_empty() {
+        if !NOTO_SANS_JP_REGULAR.is_empty() {
+            Some(NOTO_SANS_JP_REGULAR)
+        } else if !LINE_SEED_JP_REGULAR.is_empty() {
+            Some(LINE_SEED_JP_REGULAR)
+        } else {
+            None
+        }
+    }
+
+    /// 内蔵LINE Seed JPフォントデータを取得
+    pub fn builtin_line_seed_jp(&self) -> Option<&'static [u8]> {
+        if LINE_SEED_JP_REGULAR.is_empty() {
             None
         } else {
-            Some(NOTO_SANS_JP_REGULAR)
+            Some(LINE_SEED_JP_REGULAR)
         }
     }
 
@@ -57,6 +76,9 @@ impl FontManager {
             }
         }
         // 内蔵フォントをチェック
+        if name.contains("LINESeed") || name.contains("LINE Seed") || name.contains("LineSeed") {
+            return self.builtin_line_seed_jp();
+        }
         if name.contains("NotoSansJP") || name.contains("Noto") || name.contains("Japanese") {
             return self.builtin_japanese_font();
         }
@@ -70,8 +92,11 @@ impl FontManager {
             .iter()
             .map(|(name, _)| name.clone())
             .collect();
-        if self.has_builtin_japanese_font() {
+        if !NOTO_SANS_JP_REGULAR.is_empty() {
             fonts.push("NotoSansJP-Regular".to_string());
+        }
+        if !LINE_SEED_JP_REGULAR.is_empty() {
+            fonts.push("LINESeedJP-Regular".to_string());
         }
         fonts
     }

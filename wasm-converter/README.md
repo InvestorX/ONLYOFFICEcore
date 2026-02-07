@@ -31,6 +31,7 @@ Rust + WebAssembly で構築されたドキュメント変換ツールです。�
 
 - **Noto Sans JP** (Google Noto Fonts) — SIL Open Font License
 - **Noto Serif JP** (Google Noto Fonts) — SIL Open Font License
+- **LINE Seed JP** (LY Corporation) — SIL Open Font License
 
 ### フォントのダウンロード
 
@@ -153,3 +154,4 @@ GNU AGPL v3.0 — 詳細は [LICENSE.txt](../LICENSE.txt) を参照してくだ�
 ### フォントライセンス
 
 - Noto Sans JP / Noto Serif JP: [SIL Open Font License 1.1](https://scripts.sil.org/OFL)
+- LINE Seed JP: [SIL Open Font License 1.1](https://scripts.sil.org/OFL) — [公式サイト](https://seed.line.me/) / [GitHub](https://github.com/line/seed)

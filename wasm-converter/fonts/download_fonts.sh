@@ -7,6 +7,7 @@
 # 対応フォント:
 #   - Noto Sans JP (Google) - SIL Open Font License
 #   - Noto Serif JP (Google) - SIL Open Font License
+#   - LINE Seed JP (LY Corporation) - SIL Open Font License
 
 set -e
 
@@ -37,6 +38,44 @@ if [ ! -f "NotoSerifJP-Regular.ttf" ]; then
     curl -L -o "NotoSerifJP-Regular.ttf" \
         "https://github.com/googlefonts/noto-cjk/raw/main/Serif/OTF/Japanese/NotoSerifCJKjp-Regular.otf" \
         2>/dev/null || echo "  ダウンロード失敗: NotoSerifJP-Regular.ttf"
+fi
+
+# LINE Seed JP (Regular)
+if [ ! -f "LINESeedJP-Regular.ttf" ]; then
+    echo "  LINE Seed JP Regular をダウンロード中..."
+    # GitHub Releasesからダウンロードし、ZIPから該当ファイルを抽出
+    LINESEED_ZIP="$(mktemp)"
+    LINESEED_DIR="$(mktemp -d)"
+    if curl -L -o "$LINESEED_ZIP" \
+        "https://github.com/line/seed/releases/download/v20251119/seed-v20251119.zip" \
+        2>/dev/null; then
+        if unzip -o "$LINESEED_ZIP" -d "$LINESEED_DIR" 2>/dev/null; then
+            # TTFファイルを検索してコピー
+            REGULAR_TTF=$(find "$LINESEED_DIR" -name "*Regular*" -name "*.ttf" -path "*LINESeedJP*" | head -1)
+            BOLD_TTF=$(find "$LINESEED_DIR" -name "*Bold*" -not -name "*ExtraBold*" -name "*.ttf" -path "*LINESeedJP*" | head -1)
+            THIN_TTF=$(find "$LINESEED_DIR" -name "*Thin*" -name "*.ttf" -path "*LINESeedJP*" | head -1)
+            if [ -n "$REGULAR_TTF" ]; then
+                cp "$REGULAR_TTF" "LINESeedJP-Regular.ttf"
+                echo "  ✅ LINE Seed JP Regular をダウンロードしました"
+            else
+                echo "  ダウンロード失敗: LINESeedJP-Regular.ttf (ZIPにTTFが見つかりません)"
+            fi
+            if [ -n "$BOLD_TTF" ]; then
+                cp "$BOLD_TTF" "LINESeedJP-Bold.ttf"
+                echo "  ✅ LINE Seed JP Bold をダウンロードしました"
+            fi
+            if [ -n "$THIN_TTF" ]; then
+                cp "$THIN_TTF" "LINESeedJP-Thin.ttf"
+                echo "  ✅ LINE Seed JP Thin をダウンロードしました"
+            fi
+        else
+            echo "  ダウンロード失敗: LINESeedJP-Regular.ttf (ZIP展開エラー)"
+        fi
+    else
+        echo "  ダウンロード失敗: LINESeedJP-Regular.ttf"
+    fi
+    rm -f "$LINESEED_ZIP"
+    rm -rf "$LINESEED_DIR"
 fi
 
 echo ""
