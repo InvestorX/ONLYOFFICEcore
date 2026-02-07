@@ -254,13 +254,24 @@ fn test_sample_txt_to_images_zip_output() {
 fn test_line_seed_jp_font_manager() {
     let mut fm = FontManager::new();
 
-    // 外部フォントとしてLINE Seed JPを追加
+    // 外部フォントとしてLINE Seed JPを追加（ダミーデータで管理機能のみ検証）
     fm.add_font("LINESeedJP-Regular".to_string(), vec![0; 100]);
 
     let fonts = fm.available_fonts();
     assert!(fonts.contains(&"LINESeedJP-Regular".to_string()));
 
-    // フォント名でのルックアップが動作すること
+    // 外部フォントは名前の完全一致で取得可能
     assert!(fm.get_font_data("LINESeedJP-Regular").is_some());
-    assert!(fm.get_font_data("LINE Seed").is_none()); // 外部フォントは厳密マッチ
+
+    // 内蔵フォントのキーワードマッチ（embed-fontsなしでは内蔵データは空）
+    // "LINE Seed" キーワードは builtin_line_seed_jp() を参照するため、
+    // embed-fontsフィーチャー無効時はNoneが返る
+    let builtin_result = fm.get_font_data("LINE Seed");
+    if cfg!(feature = "embed-fonts") {
+        // embed-fonts有効時は内蔵フォントが返る
+        assert!(builtin_result.is_some());
+    } else {
+        // embed-fonts無効時は内蔵データが空なのでNone
+        assert!(builtin_result.is_none());
+    }
 }
