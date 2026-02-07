@@ -7,6 +7,7 @@ pub mod csv_conv;
 pub mod rtf;
 pub mod docx;
 pub mod xlsx;
+pub mod pptx;
 pub mod common_stubs;
 
 use crate::converter::{ConvertError, Document, DocumentConverter};
@@ -25,7 +26,7 @@ pub fn convert_by_extension(ext: &str, data: &[u8]) -> Result<Document, ConvertE
         "xps" => common_stubs::StubConverter::new("XPS", &["xps"]).convert(data),
         "djvu" | "djv" => common_stubs::StubConverter::new("DjVu", &["djvu", "djv"]).convert(data),
         "ppt" => common_stubs::StubConverter::new("PPT", &["ppt"]).convert(data),
-        "pptx" => common_stubs::StubConverter::new("PPTX", &["pptx"]).convert(data),
+        "pptx" => pptx::PptxConverter::new().convert(data),
         "odp" => common_stubs::StubConverter::new("ODP", &["odp"]).convert(data),
         _ => Err(ConvertError::new(
             "unknown",

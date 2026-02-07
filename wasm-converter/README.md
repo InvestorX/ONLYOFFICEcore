@@ -16,7 +16,7 @@ Rust + WebAssembly で構築されたドキュメント変換ツールです。�
 | XPS | .xps | 🔧 開発中 |
 | DjVu | .djvu | 🔧 開発中 |
 | Microsoft Excel | .xlsx, .xls, .ods | ✅ テーブル表示 |
-| Microsoft PowerPoint | .pptx | 🔧 開発中 |
+| Microsoft PowerPoint | .pptx | ✅ テキスト抽出 |
 | Microsoft PowerPoint (旧) | .ppt | 🔧 開発中 |
 | OpenDocument Presentation | .odp | 🔧 開発中 |
 
