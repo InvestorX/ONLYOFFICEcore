@@ -88,6 +88,68 @@ pub fn render_page_to_image(
                     *stroke_width * scale,
                 );
             }
+            PageElement::GradientRect {
+                x,
+                y,
+                width: w,
+                height: h,
+                stops,
+                gradient_type,
+            } => {
+                render_gradient_rect_to_pixels(
+                    &mut pixels,
+                    width,
+                    height,
+                    *x * scale,
+                    *y * scale,
+                    *w * scale,
+                    *h * scale,
+                    stops,
+                    gradient_type,
+                );
+            }
+            PageElement::Ellipse {
+                cx,
+                cy,
+                rx,
+                ry,
+                fill,
+                stroke: _,
+                stroke_width: _,
+            } => {
+                if let Some(fill_color) = fill {
+                    render_ellipse_to_pixels(
+                        &mut pixels,
+                        width,
+                        height,
+                        *cx * scale,
+                        *cy * scale,
+                        *rx * scale,
+                        *ry * scale,
+                        fill_color,
+                    );
+                }
+            }
+            PageElement::Image {
+                x: img_x,
+                y: img_y,
+                width: img_w,
+                height: img_h,
+                data,
+                mime_type,
+            } => {
+                render_image_to_pixels(
+                    &mut pixels,
+                    width,
+                    height,
+                    *img_x * scale,
+                    *img_y * scale,
+                    *img_w * scale,
+                    *img_h * scale,
+                    data,
+                    mime_type,
+                );
+            }
             PageElement::Line {
                 x1,
                 y1,
@@ -266,6 +328,321 @@ fn set_pixel(pixels: &mut [u8], width: u32, x: u32, y: u32, color: &Color) {
         pixels[idx + 1] = color.g;
         pixels[idx + 2] = color.b;
         pixels[idx + 3] = color.a;
+    }
+}
+
+/// グラデーション矩形をピクセルバッファに描画
+fn render_gradient_rect_to_pixels(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    stops: &[crate::converter::GradientStop],
+    gradient_type: &crate::converter::GradientType,
+) {
+    if stops.is_empty() || w <= 0.0 || h <= 0.0 {
+        return;
+    }
+
+    let x0 = x.max(0.0) as u32;
+    let y0 = y.max(0.0) as u32;
+    let x1 = ((x + w) as u32).min(img_width);
+    let y1 = ((y + h) as u32).min(img_height);
+
+    for py in y0..y1 {
+        for px in x0..x1 {
+            // Calculate gradient position (0.0 to 1.0)
+            let t = match gradient_type {
+                crate::converter::GradientType::Linear(angle) => {
+                    let local_x = (px as f64 - x) / w;
+                    let local_y = (py as f64 - y) / h;
+                    // Project onto gradient direction
+                    let cos_a = angle.cos();
+                    let sin_a = angle.sin();
+                    let proj = local_x * sin_a + local_y * cos_a;
+                    proj.clamp(0.0, 1.0)
+                }
+                crate::converter::GradientType::Radial => {
+                    let cx = x + w / 2.0;
+                    let cy = y + h / 2.0;
+                    let dx = (px as f64 - cx) / (w / 2.0);
+                    let dy = (py as f64 - cy) / (h / 2.0);
+                    (dx * dx + dy * dy).sqrt().min(1.0)
+                }
+            };
+
+            let color = interpolate_gradient(stops, t);
+            let idx = ((py * img_width + px) * 4) as usize;
+            if idx + 3 < pixels.len() {
+                // Alpha blending
+                let alpha = color.a as f64 / 255.0;
+                pixels[idx] = (pixels[idx] as f64 * (1.0 - alpha) + color.r as f64 * alpha) as u8;
+                pixels[idx + 1] =
+                    (pixels[idx + 1] as f64 * (1.0 - alpha) + color.g as f64 * alpha) as u8;
+                pixels[idx + 2] =
+                    (pixels[idx + 2] as f64 * (1.0 - alpha) + color.b as f64 * alpha) as u8;
+                pixels[idx + 3] = 255;
+            }
+        }
+    }
+}
+
+/// グラデーション停止点間の色を補間
+fn interpolate_gradient(stops: &[crate::converter::GradientStop], t: f64) -> Color {
+    if stops.is_empty() {
+        return Color::WHITE;
+    }
+    if stops.len() == 1 {
+        return stops[0].color;
+    }
+
+    // Find the two stops to interpolate between
+    if t <= stops[0].position {
+        return stops[0].color;
+    }
+    if t >= stops[stops.len() - 1].position {
+        return stops[stops.len() - 1].color;
+    }
+
+    for i in 0..stops.len() - 1 {
+        if t >= stops[i].position && t <= stops[i + 1].position {
+            let range = stops[i + 1].position - stops[i].position;
+            if range <= 0.0 {
+                return stops[i].color;
+            }
+            let local_t = (t - stops[i].position) / range;
+            let c1 = &stops[i].color;
+            let c2 = &stops[i + 1].color;
+            return Color {
+                r: (c1.r as f64 + (c2.r as f64 - c1.r as f64) * local_t) as u8,
+                g: (c1.g as f64 + (c2.g as f64 - c1.g as f64) * local_t) as u8,
+                b: (c1.b as f64 + (c2.b as f64 - c1.b as f64) * local_t) as u8,
+                a: 255,
+            };
+        }
+    }
+    stops[0].color
+}
+
+/// 楕円をピクセルバッファに描画
+fn render_ellipse_to_pixels(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    cx: f64,
+    cy: f64,
+    rx: f64,
+    ry: f64,
+    color: &Color,
+) {
+    let x0 = (cx - rx).max(0.0) as u32;
+    let y0 = (cy - ry).max(0.0) as u32;
+    let x1 = ((cx + rx) as u32).min(img_width);
+    let y1 = ((cy + ry) as u32).min(img_height);
+
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let dx = (px as f64 - cx) / rx;
+            let dy = (py as f64 - cy) / ry;
+            if dx * dx + dy * dy <= 1.0 {
+                set_pixel(pixels, img_width, px, py, color);
+            }
+        }
+    }
+}
+
+/// 画像をピクセルバッファに描画（JPEG/PNGデコード）
+fn render_image_to_pixels(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    data: &[u8],
+    _mime_type: &str,
+) {
+    // Try PNG decoding first
+    if let Some(decoded) = decode_png_image(data) {
+        blit_decoded_image(pixels, img_width, img_height, x, y, w, h, &decoded);
+        return;
+    }
+    // Try JPEG decoding
+    if let Some(decoded) = decode_jpeg_image(data) {
+        blit_decoded_image(pixels, img_width, img_height, x, y, w, h, &decoded);
+        return;
+    }
+    // Fallback: render placeholder rect
+    render_rect_to_pixels(
+        pixels, img_width, img_height, x, y, w, h,
+        Some(&Color::rgb(220, 220, 220)),
+        Some(&Color::rgb(180, 180, 180)),
+        1.0,
+    );
+}
+
+/// デコードされた画像データ
+struct DecodedImage {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>, // RGBA
+}
+
+/// PNG画像をデコード
+fn decode_png_image(data: &[u8]) -> Option<DecodedImage> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(data));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let width = info.width;
+    let height = info.height;
+
+    // Convert to RGBA
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
+        png::ColorType::Rgb => {
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for chunk in buf[..info.buffer_size()].chunks(3) {
+                rgba.push(chunk[0]);
+                rgba.push(chunk[1]);
+                rgba.push(chunk[2]);
+                rgba.push(255);
+            }
+            rgba
+        }
+        png::ColorType::Grayscale => {
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for &g in &buf[..info.buffer_size()] {
+                rgba.push(g);
+                rgba.push(g);
+                rgba.push(g);
+                rgba.push(255);
+            }
+            rgba
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for chunk in buf[..info.buffer_size()].chunks(2) {
+                rgba.push(chunk[0]);
+                rgba.push(chunk[0]);
+                rgba.push(chunk[0]);
+                rgba.push(chunk[1]);
+            }
+            rgba
+        }
+        _ => return None,
+    };
+
+    Some(DecodedImage { width, height, pixels: rgba })
+}
+
+/// JPEG画像をデコード（簡易実装）
+fn decode_jpeg_image(data: &[u8]) -> Option<DecodedImage> {
+    // Check JPEG magic bytes
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+
+    // Parse JPEG markers to get dimensions
+    let mut i = 2;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    while i + 4 < data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        if marker == 0xD9 {
+            break; // EOI
+        }
+        if i + 3 >= data.len() {
+            break;
+        }
+        let length = ((data[i + 2] as usize) << 8) | (data[i + 3] as usize);
+
+        // SOF markers (Start of Frame)
+        if (0xC0..=0xC3).contains(&marker) || (0xC5..=0xC7).contains(&marker) {
+            if i + 8 < data.len() {
+                height = ((data[i + 5] as u32) << 8) | (data[i + 6] as u32);
+                width = ((data[i + 7] as u32) << 8) | (data[i + 8] as u32);
+            }
+            break;
+        }
+        i += 2 + length;
+    }
+
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    // For JPEG, we produce a placeholder with estimated dimensions
+    // Full JPEG decode requires complex DCT/Huffman - placeholder with solid color
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    // Fill with a mid-gray as placeholder (indicates image position)
+    for chunk in pixels.chunks_exact_mut(4) {
+        chunk[0] = 200;
+        chunk[1] = 200;
+        chunk[2] = 200;
+        chunk[3] = 255;
+    }
+    Some(DecodedImage { width, height, pixels })
+}
+
+/// デコードされた画像をターゲットバッファにブリット（スケーリング付き）
+fn blit_decoded_image(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    src: &DecodedImage,
+) {
+    if src.width == 0 || src.height == 0 || w <= 0.0 || h <= 0.0 {
+        return;
+    }
+
+    let x0 = x.max(0.0) as u32;
+    let y0 = y.max(0.0) as u32;
+    let x1 = ((x + w) as u32).min(img_width);
+    let y1 = ((y + h) as u32).min(img_height);
+
+    for py in y0..y1 {
+        for px in x0..x1 {
+            // Map to source pixel (nearest neighbor)
+            let src_x = ((px as f64 - x) / w * src.width as f64) as u32;
+            let src_y = ((py as f64 - y) / h * src.height as f64) as u32;
+            if src_x < src.width && src_y < src.height {
+                let src_idx = ((src_y * src.width + src_x) * 4) as usize;
+                let dst_idx = ((py * img_width + px) * 4) as usize;
+                if src_idx + 3 < src.pixels.len() && dst_idx + 3 < pixels.len() {
+                    let src_a = src.pixels[src_idx + 3] as f64 / 255.0;
+                    if src_a > 0.99 {
+                        pixels[dst_idx] = src.pixels[src_idx];
+                        pixels[dst_idx + 1] = src.pixels[src_idx + 1];
+                        pixels[dst_idx + 2] = src.pixels[src_idx + 2];
+                        pixels[dst_idx + 3] = 255;
+                    } else if src_a > 0.01 {
+                        pixels[dst_idx] = (pixels[dst_idx] as f64 * (1.0 - src_a)
+                            + src.pixels[src_idx] as f64 * src_a)
+                            as u8;
+                        pixels[dst_idx + 1] = (pixels[dst_idx + 1] as f64 * (1.0 - src_a)
+                            + src.pixels[src_idx + 1] as f64 * src_a)
+                            as u8;
+                        pixels[dst_idx + 2] = (pixels[dst_idx + 2] as f64 * (1.0 - src_a)
+                            + src.pixels[src_idx + 2] as f64 * src_a)
+                            as u8;
+                        pixels[dst_idx + 3] = 255;
+                    }
+                }
+            }
+        }
     }
 }
 

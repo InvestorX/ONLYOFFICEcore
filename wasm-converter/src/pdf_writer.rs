@@ -3,7 +3,7 @@
 // 外部クレートに依存せず、PDF 1.4仕様に準拠したPDFバイト列を直接生成します。
 // 日本語テキスト（Unicode）をサポートします。
 
-use crate::converter::{Document, FontStyle, Page, PageElement, Table, TextAlign};
+use crate::converter::{Color, Document, FontStyle, GradientStop, GradientType, Page, PageElement, Table, TextAlign};
 use crate::font_manager::FontManager;
 
 /// PDFオブジェクト
@@ -287,8 +287,52 @@ impl PdfWriter {
                         );
                     }
                 }
-                PageElement::Image { .. } => {
-                    // 画像のPDF埋め込みは将来実装
+                PageElement::Image {
+                    x: img_x,
+                    y: img_y,
+                    width: img_w,
+                    height: img_h,
+                    ..
+                } => {
+                    // Draw a placeholder rectangle for the image position in PDF
+                    // (Full image XObject embedding is complex; we show the bounding box)
+                    let py = page.height - img_y - img_h;
+                    stream.extend_from_slice(
+                        format!(
+                            "0.88 0.88 0.88 rg\n{} {} {} {} re\nf\n\
+                             0.7 0.7 0.7 RG\n0.5 w\n{} {} {} {} re\nS\n",
+                            img_x, py, img_w, img_h,
+                            img_x, py, img_w, img_h
+                        )
+                        .as_bytes(),
+                    );
+                }
+                PageElement::GradientRect {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                    stops,
+                    gradient_type,
+                } => {
+                    // Approximate gradient with multiple thin strips
+                    self.render_gradient_rect(
+                        &mut stream, *x, *y, *w, *h, stops, gradient_type, page.height,
+                    );
+                }
+                PageElement::Ellipse {
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    fill,
+                    stroke,
+                    stroke_width,
+                } => {
+                    self.render_ellipse(
+                        &mut stream, *cx, *cy, *rx, *ry, fill, stroke, *stroke_width,
+                        page.height,
+                    );
                 }
                 PageElement::TableBlock {
                     x,
@@ -397,6 +441,146 @@ impl PdfWriter {
 
                 cell_x += cw;
             }
+        }
+    }
+
+    /// グラデーション矩形をPDFストリームに出力（ストライプ近似）
+    #[allow(clippy::too_many_arguments)]
+    fn render_gradient_rect(
+        &self,
+        stream: &mut Vec<u8>,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        stops: &[GradientStop],
+        gradient_type: &GradientType,
+        page_height: f64,
+    ) {
+        if stops.is_empty() || w <= 0.0 || h <= 0.0 {
+            return;
+        }
+
+        // Approximate with thin horizontal/vertical strips
+        let num_strips = 50u32;
+        let strip_height = h / num_strips as f64;
+
+        for i in 0..num_strips {
+            let t = match gradient_type {
+                GradientType::Linear(angle) => {
+                    let local_y = i as f64 / num_strips as f64;
+                    let cos_a = angle.cos();
+                    let sin_a = angle.sin();
+                    (0.5 * sin_a + local_y * cos_a).clamp(0.0, 1.0)
+                }
+                GradientType::Radial => {
+                    let local_y = (i as f64 / num_strips as f64 - 0.5).abs() * 2.0;
+                    local_y.min(1.0)
+                }
+            };
+
+            let color = Self::interpolate_gradient_color(stops, t);
+            let strip_y = page_height - y - (i + 1) as f64 * strip_height;
+            stream.extend_from_slice(
+                format!(
+                    "{:.4} {:.4} {:.4} rg\n{} {} {} {} re\nf\n",
+                    color.r as f64 / 255.0,
+                    color.g as f64 / 255.0,
+                    color.b as f64 / 255.0,
+                    x,
+                    strip_y,
+                    w,
+                    strip_height + 0.5 // Slight overlap to avoid gaps
+                )
+                .as_bytes(),
+            );
+        }
+    }
+
+    /// グラデーション停止点間の色を補間
+    fn interpolate_gradient_color(stops: &[GradientStop], t: f64) -> Color {
+        if stops.is_empty() {
+            return Color::WHITE;
+        }
+        if stops.len() == 1 || t <= stops[0].position {
+            return stops[0].color;
+        }
+        if t >= stops[stops.len() - 1].position {
+            return stops[stops.len() - 1].color;
+        }
+        for i in 0..stops.len() - 1 {
+            if t >= stops[i].position && t <= stops[i + 1].position {
+                let range = stops[i + 1].position - stops[i].position;
+                if range <= 0.0 {
+                    return stops[i].color;
+                }
+                let lt = (t - stops[i].position) / range;
+                let c1 = &stops[i].color;
+                let c2 = &stops[i + 1].color;
+                return Color {
+                    r: (c1.r as f64 + (c2.r as f64 - c1.r as f64) * lt) as u8,
+                    g: (c1.g as f64 + (c2.g as f64 - c1.g as f64) * lt) as u8,
+                    b: (c1.b as f64 + (c2.b as f64 - c1.b as f64) * lt) as u8,
+                    a: 255,
+                };
+            }
+        }
+        stops[0].color
+    }
+
+    /// 楕円をPDFストリームに出力（ベジェ曲線近似）
+    #[allow(clippy::too_many_arguments)]
+    fn render_ellipse(
+        &self,
+        stream: &mut Vec<u8>,
+        cx: f64,
+        cy: f64,
+        rx: f64,
+        ry: f64,
+        fill: &Option<Color>,
+        stroke: &Option<Color>,
+        stroke_width: f64,
+        page_height: f64,
+    ) {
+        let pcy = page_height - cy;
+        // Bezier approximation of ellipse: kappa = 4 * (sqrt(2) - 1) / 3
+        let k = 0.5522847498;
+        let kx = rx * k;
+        let ky = ry * k;
+
+        let path = format!(
+            "{} {} m\n{} {} {} {} {} {} c\n{} {} {} {} {} {} c\n{} {} {} {} {} {} c\n{} {} {} {} {} {} c\n",
+            cx + rx, pcy,
+            cx + rx, pcy + ky, cx + kx, pcy + ry, cx, pcy + ry,
+            cx - kx, pcy + ry, cx - rx, pcy + ky, cx - rx, pcy,
+            cx - rx, pcy - ky, cx - kx, pcy - ry, cx, pcy - ry,
+            cx + kx, pcy - ry, cx + rx, pcy - ky, cx + rx, pcy,
+        );
+
+        if let Some(fill_color) = fill {
+            stream.extend_from_slice(
+                format!(
+                    "{} {} {} rg\n{}f\n",
+                    fill_color.r as f64 / 255.0,
+                    fill_color.g as f64 / 255.0,
+                    fill_color.b as f64 / 255.0,
+                    path
+                )
+                .as_bytes(),
+            );
+        }
+        if let Some(stroke_color) = stroke {
+            stream.extend_from_slice(
+                format!(
+                    "{} {} {} RG\n{} w\n{}S\n",
+                    stroke_color.r as f64 / 255.0,
+                    stroke_color.g as f64 / 255.0,
+                    stroke_color.b as f64 / 255.0,
+                    stroke_width,
+                    path
+                )
+                .as_bytes(),
+            );
         }
     }
 

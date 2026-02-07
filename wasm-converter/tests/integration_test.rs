@@ -620,10 +620,11 @@ fn test_sample_xlsx_to_pdf_with_calamine() {
     eprintln!("✅ XLSX→PDF出力: {} ({} bytes, {}ページ)", out_path, pdf.len(), doc.pages.len());
 }
 
-/// Sample_12.pptxでのレイアウト保持変換テスト
+/// Sample_12.pptxでのレイアウト保持変換テスト（背景画像・グラデーション・シャドウ含む）
 /// (ファイルが存在しない場合はスキップ)
 #[test]
 fn test_real_sample12_pptx_layout() {
+    use wasm_document_converter::converter::PageElement;
     use std::io::Write;
 
     let pptx_path = "/tmp/Sample_12.pptx";
@@ -641,16 +642,44 @@ fn test_real_sample12_pptx_layout() {
 
     eprintln!("スライド数: {}", doc.pages.len());
     for (i, page) in doc.pages.iter().enumerate() {
+        let mut counts = std::collections::HashMap::new();
+        for elem in &page.elements {
+            let key = match elem {
+                PageElement::Rect { .. } => "Rect",
+                PageElement::GradientRect { .. } => "Gradient",
+                PageElement::Image { .. } => "Image",
+                PageElement::Text { .. } => "Text",
+                PageElement::Line { .. } => "Line",
+                PageElement::Ellipse { .. } => "Ellipse",
+                PageElement::TableBlock { .. } => "Table",
+            };
+            *counts.entry(key).or_insert(0u32) += 1;
+        }
         eprintln!(
-            "  スライド {}: {}x{} ({} 要素)",
+            "  スライド {}: {}x{} ({} 要素: {:?})",
             i + 1,
             page.width as i32,
             page.height as i32,
-            page.elements.len()
+            page.elements.len(),
+            counts,
         );
     }
 
     assert!(doc.pages.len() >= 10, "12スライドあるはず（実際: {}）", doc.pages.len());
+
+    // Slide 1 should have background image (from blipFill)
+    let slide1 = &doc.pages[0];
+    let has_bg_image = slide1.elements.iter().any(|e| matches!(e, PageElement::Image { .. }));
+    eprintln!("  スライド1 背景画像: {}", has_bg_image);
+    assert!(has_bg_image, "スライド1には背景画像があるはず");
+
+    // Slide 4 should have gradient background
+    if doc.pages.len() > 3 {
+        let slide4 = &doc.pages[3];
+        let has_gradient = slide4.elements.iter().any(|e| matches!(e, PageElement::GradientRect { .. }));
+        eprintln!("  スライド4 グラデーション背景: {}", has_gradient);
+        assert!(has_gradient, "スライド4にはグラデーション背景があるはず");
+    }
 
     // PDF出力
     let pdf = pdf_writer::render_to_pdf(&doc);
@@ -660,8 +689,23 @@ fn test_real_sample12_pptx_layout() {
     f.write_all(&pdf).unwrap();
     eprintln!("✅ PDF出力: {} ({} bytes)", pdf_path, pdf.len());
 
-    // 画像ZIP出力
+    // 個別スライドPNG出力（確認用）
     let fm = FontManager::new();
+    let config = image_renderer::ImageRenderConfig {
+        dpi: 150.0,
+        ..Default::default()
+    };
+    for idx in [0, 3, 4] {
+        if idx < doc.pages.len() {
+            let img = image_renderer::render_page_to_image(&doc.pages[idx], &config, &fm);
+            let png_path = format!("/tmp/wasm_converter_sample12_slide{}.png", idx + 1);
+            let mut f = std::fs::File::create(&png_path).unwrap();
+            f.write_all(&img).unwrap();
+            eprintln!("✅ スライド{} PNG: {} ({} bytes)", idx + 1, png_path, img.len());
+        }
+    }
+
+    // 画像ZIP出力
     let zip_data = image_renderer::render_to_images_zip(&doc, &fm);
     assert!(zip_data.starts_with(b"PK"));
     let zip_path = "/tmp/wasm_converter_sample12_pages.zip";

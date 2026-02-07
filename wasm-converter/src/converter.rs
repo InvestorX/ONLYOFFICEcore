@@ -124,6 +124,24 @@ pub struct Table {
     pub column_widths: Vec<f64>,
 }
 
+/// グラデーション停止点
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GradientStop {
+    /// 位置（0.0〜1.0）
+    pub position: f64,
+    /// 色
+    pub color: Color,
+}
+
+/// グラデーション種類
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GradientType {
+    /// 線形グラデーション（角度はラジアン）
+    Linear(f64),
+    /// 放射状グラデーション
+    Radial,
+}
+
 /// ページ要素
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PageElement {
@@ -160,6 +178,25 @@ pub enum PageElement {
         y: f64,
         width: f64,
         height: f64,
+        fill: Option<Color>,
+        stroke: Option<Color>,
+        stroke_width: f64,
+    },
+    /// グラデーション矩形
+    GradientRect {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        stops: Vec<GradientStop>,
+        gradient_type: GradientType,
+    },
+    /// 楕円
+    Ellipse {
+        cx: f64,
+        cy: f64,
+        rx: f64,
+        ry: f64,
         fill: Option<Color>,
         stroke: Option<Color>,
         stroke_width: f64,

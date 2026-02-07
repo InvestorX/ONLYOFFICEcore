@@ -5,7 +5,8 @@
 // Officeソフトで開いてPDF化するのと同等の出力を目指します。
 
 use crate::converter::{
-    Color, ConvertError, Document, DocumentConverter, FontStyle, Metadata, Page, PageElement, TextAlign,
+    Color, ConvertError, Document, DocumentConverter, FontStyle, GradientStop, GradientType,
+    Metadata, Page, PageElement, TextAlign,
 };
 
 /// EMU (English Metric Unit) → ポイント変換定数
@@ -26,6 +27,9 @@ impl DocumentConverter for PptxConverter {
         let cursor = std::io::Cursor::new(input);
         let mut archive = zip::ZipArchive::new(cursor)
             .map_err(|e| ConvertError::new("PPTX", &format!("ZIPアーカイブを開けません: {}", e)))?;
+
+        // テーマカラーを読み込む
+        let theme_colors = read_theme_colors(&mut archive);
 
         // スライドサイズをpresentation.xmlから取得
         let slide_size = read_slide_size(&mut archive);
@@ -52,48 +56,20 @@ impl DocumentConverter for PptxConverter {
                 + ".rels";
             let rels = read_zip_entry_string(&mut archive, &rels_path).ok();
 
-            // XMLからシェイプを解析
-            let shapes = parse_slide_shapes(&slide_xml);
+            // XMLからシェイプを解析（グループシェイプも含む）
+            let shapes = parse_slide_shapes(&slide_xml, &theme_colors);
 
-            // スライド背景色を検出
-            let bg_color = parse_slide_background(&slide_xml);
+            // スライド背景を解析（画像・グラデーション含む）
+            let bg = parse_slide_background_full(&slide_xml, &rels, &mut archive, &theme_colors);
 
             // 画像データを解決
             let mut resolved_shapes = Vec::new();
             for shape in shapes {
-                if let ShapeContent::Image { r_id } = &shape.content {
-                    if let Some(ref rels_xml) = rels {
-                        if let Some(target) = resolve_relationship(rels_xml, r_id) {
-                            let img_path = if target.starts_with('/') {
-                                target[1..].to_string()
-                            } else {
-                                format!("ppt/slides/{}", target)
-                            };
-                            // Normalize path
-                            let img_path = normalize_zip_path(&img_path);
-                            if let Ok(data) = read_zip_entry_bytes(&mut archive, &img_path) {
-                                let mime = if img_path.ends_with(".png") {
-                                    "image/png"
-                                } else if img_path.ends_with(".jpeg") || img_path.ends_with(".jpg") {
-                                    "image/jpeg"
-                                } else {
-                                    "image/png"
-                                };
-                                let mut s = shape.clone();
-                                s.content = ShapeContent::ImageData {
-                                    data,
-                                    mime_type: mime.to_string(),
-                                };
-                                resolved_shapes.push(s);
-                                continue;
-                            }
-                        }
-                    }
-                }
-                resolved_shapes.push(shape);
+                let resolved = resolve_shape_images(shape, &rels, &mut archive);
+                resolved_shapes.push(resolved);
             }
 
-            let page = render_slide_page(&resolved_shapes, &slide_size, bg_color);
+            let page = render_slide_page(&resolved_shapes, &slide_size, bg.as_ref());
             doc.pages.push(page);
         }
 
@@ -130,6 +106,91 @@ impl Default for SlideSize {
     }
 }
 
+/// スライド背景
+#[derive(Debug, Clone)]
+enum SlideBg {
+    Solid(Color),
+    Gradient {
+        stops: Vec<GradientStop>,
+        angle: f64, // radians
+    },
+    Image {
+        data: Vec<u8>,
+        mime_type: String,
+    },
+}
+
+/// テーマカラーマップ
+#[derive(Debug, Clone)]
+struct ThemeColors {
+    dk1: Color,
+    lt1: Color,
+    dk2: Color,
+    lt2: Color,
+    accent1: Color,
+    accent2: Color,
+    accent3: Color,
+    accent4: Color,
+    accent5: Color,
+    accent6: Color,
+    hlink: Color,
+    fol_hlink: Color,
+}
+
+impl Default for ThemeColors {
+    fn default() -> Self {
+        Self {
+            dk1: Color::rgb(0, 0, 0),
+            lt1: Color::rgb(255, 255, 255),
+            dk2: Color::rgb(68, 84, 106),
+            lt2: Color::rgb(231, 230, 230),
+            accent1: Color::rgb(91, 155, 213),
+            accent2: Color::rgb(237, 125, 49),
+            accent3: Color::rgb(165, 165, 165),
+            accent4: Color::rgb(255, 192, 0),
+            accent5: Color::rgb(68, 114, 196),
+            accent6: Color::rgb(112, 173, 71),
+            hlink: Color::rgb(5, 99, 193),
+            fol_hlink: Color::rgb(149, 79, 114),
+        }
+    }
+}
+
+impl ThemeColors {
+    fn resolve(&self, scheme_name: &str) -> Color {
+        match scheme_name {
+            "tx1" | "dk1" => self.dk1,
+            "bg1" | "lt1" => self.lt1,
+            "dk2" | "tx2" => self.dk2,
+            "lt2" | "bg2" => self.lt2,
+            "accent1" => self.accent1,
+            "accent2" => self.accent2,
+            "accent3" => self.accent3,
+            "accent4" => self.accent4,
+            "accent5" => self.accent5,
+            "accent6" => self.accent6,
+            "hlink" => self.hlink,
+            "folHlink" => self.fol_hlink,
+            _ => Color::rgb(0, 0, 0),
+        }
+    }
+}
+
+/// シェイプ塗りつぶし
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum ShapeFill {
+    Solid(Color),
+    Gradient {
+        stops: Vec<GradientStop>,
+        angle: f64,
+    },
+    Image {
+        data: Vec<u8>,
+        mime_type: String,
+    },
+}
+
 /// シェイプの解析結果
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -139,9 +200,20 @@ struct SlideShape {
     width: f64,
     height: f64,
     content: ShapeContent,
-    fill: Option<Color>,
+    fill: Option<ShapeFill>,
     outline: Option<(Color, f64)>,
     rotation: f64,
+    shadow: Option<ShadowEffect>,
+}
+
+/// シャドウ効果
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct ShadowEffect {
+    color: Color,
+    blur_radius: f64,
+    offset_x: f64,
+    offset_y: f64,
 }
 
 /// シェイプの内容
@@ -241,6 +313,291 @@ fn extract_slide_number(path: &str) -> u32 {
 
 // ── Presentation parsing ──
 
+/// テーマカラーをtheme.xmlから読み込む
+fn read_theme_colors(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>) -> ThemeColors {
+    let theme_xml = match read_zip_entry_string(archive, "ppt/theme/theme1.xml") {
+        Ok(s) => s,
+        Err(_) => return ThemeColors::default(),
+    };
+    let mut reader = quick_xml::Reader::from_str(&theme_xml);
+    let mut buf = Vec::new();
+    let mut colors = ThemeColors::default();
+    let mut current_scheme_entry = String::new();
+    let mut in_clr_scheme = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::Start(ref e)) => {
+                let local = e.local_name();
+                match local.as_ref() {
+                    b"clrScheme" => in_clr_scheme = true,
+                    b"dk1" | b"lt1" | b"dk2" | b"lt2" | b"accent1" | b"accent2" | b"accent3"
+                    | b"accent4" | b"accent5" | b"accent6" | b"hlink" | b"folHlink"
+                        if in_clr_scheme =>
+                    {
+                        current_scheme_entry =
+                            String::from_utf8_lossy(local.as_ref()).to_string();
+                    }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(ref e)) => {
+                if in_clr_scheme && !current_scheme_entry.is_empty() {
+                    let local = e.local_name();
+                    let color = match local.as_ref() {
+                        b"srgbClr" => {
+                            e.attributes().flatten().find(|a| a.key.as_ref() == b"val")
+                                .and_then(|a| parse_hex_color(&String::from_utf8_lossy(&a.value)))
+                        }
+                        b"sysClr" => {
+                            e.attributes().flatten().find(|a| a.key.as_ref() == b"lastClr")
+                                .and_then(|a| parse_hex_color(&String::from_utf8_lossy(&a.value)))
+                        }
+                        _ => None,
+                    };
+                    if let Some(c) = color {
+                        match current_scheme_entry.as_str() {
+                            "dk1" => colors.dk1 = c,
+                            "lt1" => colors.lt1 = c,
+                            "dk2" => colors.dk2 = c,
+                            "lt2" => colors.lt2 = c,
+                            "accent1" => colors.accent1 = c,
+                            "accent2" => colors.accent2 = c,
+                            "accent3" => colors.accent3 = c,
+                            "accent4" => colors.accent4 = c,
+                            "accent5" => colors.accent5 = c,
+                            "accent6" => colors.accent6 = c,
+                            "hlink" => colors.hlink = c,
+                            "folHlink" => colors.fol_hlink = c,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::End(ref e)) => {
+                let local = e.local_name();
+                if local.as_ref() == b"clrScheme" {
+                    in_clr_scheme = false;
+                }
+                if in_clr_scheme {
+                    match local.as_ref() {
+                        b"dk1" | b"lt1" | b"dk2" | b"lt2" | b"accent1" | b"accent2"
+                        | b"accent3" | b"accent4" | b"accent5" | b"accent6" | b"hlink"
+                        | b"folHlink" => {
+                            current_scheme_entry.clear();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    colors
+}
+
+/// シェイプの画像参照を解決
+fn resolve_shape_images(
+    shape: SlideShape,
+    rels: &Option<String>,
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+) -> SlideShape {
+    if let ShapeContent::Image { ref r_id } = shape.content {
+        if let Some(ref rels_xml) = rels {
+            if let Some(target) = resolve_relationship(rels_xml, r_id) {
+                let img_path = if target.starts_with('/') {
+                    target[1..].to_string()
+                } else {
+                    format!("ppt/slides/{}", target)
+                };
+                let img_path = normalize_zip_path(&img_path);
+                if let Ok(data) = read_zip_entry_bytes(archive, &img_path) {
+                    let mime = guess_mime(&img_path);
+                    let mut s = shape;
+                    s.content = ShapeContent::ImageData {
+                        data,
+                        mime_type: mime.to_string(),
+                    };
+                    return s;
+                }
+            }
+        }
+    }
+    shape
+}
+
+/// ファイルパスからMIMEタイプを推測
+fn guess_mime(path: &str) -> &'static str {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpeg") || lower.ends_with(".jpg") {
+        "image/jpeg"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".svg") {
+        "image/svg+xml"
+    } else if lower.ends_with(".emf") {
+        "image/emf"
+    } else if lower.ends_with(".wmf") {
+        "image/wmf"
+    } else {
+        "image/png"
+    }
+}
+
+/// スライド背景を完全解析（画像・グラデーション・ソリッド）
+fn parse_slide_background_full(
+    xml: &str,
+    rels: &Option<String>,
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    theme_colors: &ThemeColors,
+) -> Option<SlideBg> {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut in_bg = false;
+    let mut in_bg_pr = false;
+    let mut in_solid_fill = false;
+    let mut in_grad_fill = false;
+    let mut in_blip_fill = false;
+    let mut grad_stops: Vec<GradientStop> = Vec::new();
+    let mut grad_angle: f64 = 0.0;
+    let mut cur_grad_pos: f64 = 0.0;
+    let mut blip_r_id = String::new();
+    let mut in_gs = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::Start(ref e)) => {
+                let local = e.local_name();
+                match local.as_ref() {
+                    b"bg" => in_bg = true,
+                    b"bgPr" if in_bg => in_bg_pr = true,
+                    b"solidFill" if in_bg_pr => in_solid_fill = true,
+                    b"gradFill" if in_bg_pr => {
+                        in_grad_fill = true;
+                        grad_stops.clear();
+                    }
+                    b"blipFill" if in_bg_pr => in_blip_fill = true,
+                    b"blip" if in_blip_fill => {
+                        for attr in e.attributes().flatten() {
+                            let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                            if key.ends_with("embed") || key == "embed" {
+                                blip_r_id = String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
+                    b"gs" if in_grad_fill => {
+                        in_gs = true;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"pos" {
+                                cur_grad_pos = String::from_utf8_lossy(&attr.value)
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0)
+                                    / 100000.0;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(ref e)) => {
+                let local = e.local_name();
+                if (in_solid_fill || in_gs) && (local.as_ref() == b"srgbClr" || local.as_ref() == b"schemeClr") {
+                    let color = parse_color_element_themed(e, theme_colors);
+                    if let Some(c) = color {
+                        if in_gs {
+                            grad_stops.push(GradientStop {
+                                position: cur_grad_pos,
+                                color: c,
+                            });
+                        } else if in_solid_fill {
+                            return Some(SlideBg::Solid(c));
+                        }
+                    }
+                }
+                // blip in empty form
+                if local.as_ref() == b"blip" && in_blip_fill {
+                    for attr in e.attributes().flatten() {
+                        let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                        if key.ends_with("embed") || key == "embed" {
+                            blip_r_id = String::from_utf8_lossy(&attr.value).to_string();
+                        }
+                    }
+                }
+                // Linear gradient angle
+                if local.as_ref() == b"lin" && in_grad_fill {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"ang" {
+                            let ang_60k = String::from_utf8_lossy(&attr.value)
+                                .parse::<f64>()
+                                .unwrap_or(0.0);
+                            grad_angle = ang_60k / 60000.0 * std::f64::consts::PI / 180.0;
+                        }
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::End(ref e)) => {
+                let local = e.local_name();
+                match local.as_ref() {
+                    b"bg" => {
+                        // End of background - return what we found
+                        if !blip_r_id.is_empty() {
+                            // Resolve background image
+                            if let Some(ref rels_xml) = rels {
+                                if let Some(target) = resolve_relationship(rels_xml, &blip_r_id) {
+                                    let img_path = if target.starts_with('/') {
+                                        target[1..].to_string()
+                                    } else {
+                                        format!("ppt/slides/{}", target)
+                                    };
+                                    let img_path = normalize_zip_path(&img_path);
+                                    if let Ok(data) = read_zip_entry_bytes(archive, &img_path) {
+                                        let mime = guess_mime(&img_path);
+                                        return Some(SlideBg::Image {
+                                            data,
+                                            mime_type: mime.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        if !grad_stops.is_empty() {
+                            return Some(SlideBg::Gradient {
+                                stops: grad_stops,
+                                angle: grad_angle,
+                            });
+                        }
+                        in_bg = false;
+                    }
+                    b"bgPr" => in_bg_pr = false,
+                    b"solidFill" => in_solid_fill = false,
+                    b"gradFill" if in_bg_pr => {
+                        if !grad_stops.is_empty() {
+                            return Some(SlideBg::Gradient {
+                                stops: grad_stops,
+                                angle: grad_angle,
+                            });
+                        }
+                        in_grad_fill = false;
+                    }
+                    b"blipFill" => in_blip_fill = false,
+                    b"gs" => in_gs = false,
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    None
+}
+
 fn read_slide_size(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>) -> SlideSize {
     let pres_xml = match read_zip_entry_string(archive, "ppt/presentation.xml") {
         Ok(s) => s,
@@ -289,8 +646,8 @@ fn read_slide_size(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>) -> Sli
 
 // ── Slide XML parsing ──
 
-/// スライドXMLからシェイプを完全解析
-fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
+/// スライドXMLからシェイプを完全解析（グループシェイプ含む）
+fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> {
     let mut shapes = Vec::new();
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut buf = Vec::new();
@@ -300,6 +657,8 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
     let mut in_sp = false;       // <p:sp>
     let mut in_pic = false;      // <p:pic>
     let mut in_cxn = false;      // <p:cxnSp>
+    let mut in_grp = false;      // <p:grpSp>
+    let mut grp_depth = 0u32;
     let mut shape_depth = 0u32;
 
     // Current shape state
@@ -307,9 +666,10 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
     let mut cur_y: f64 = 0.0;
     let mut cur_w: f64 = 0.0;
     let mut cur_h: f64 = 0.0;
-    let mut cur_fill: Option<Color> = None;
+    let mut cur_fill: Option<ShapeFill> = None;
     let mut cur_outline: Option<(Color, f64)> = None;
     let mut cur_rotation: f64 = 0.0;
+    let mut cur_shadow: Option<ShadowEffect> = None;
     let mut cur_paragraphs: Vec<ShapeParagraph> = Vec::new();
     let mut cur_runs: Vec<TextRun> = Vec::new();
     let mut cur_align = TextAlign::Left;
@@ -331,6 +691,22 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
     let mut in_rpr = false;      // <a:rPr>
     let mut in_solid_fill = false;
     let mut solid_fill_ctx = 0u8; // 0=shape, 1=outline, 2=text
+    let mut in_grad_fill = false;
+    let mut _grad_fill_ctx = 0u8; // 0=shape (reserved for future per-context gradients)
+    let mut grad_stops: Vec<GradientStop> = Vec::new();
+    let mut grad_angle: f64 = 0.0;
+    let mut cur_grad_pos: f64 = 0.0;
+    let mut in_gs = false;
+    let mut in_effect_lst = false;
+    let mut in_outer_shdw = false;
+    let mut shdw_color: Option<Color> = None;
+    let mut shdw_blur: f64 = 0.0;
+    let mut shdw_dist: f64 = 0.0;
+    let mut shdw_dir: f64 = 0.0;
+
+    // Group shape offset for coordinate transform
+    let mut grp_off_x: f64 = 0.0;
+    let mut grp_off_y: f64 = 0.0;
 
     macro_rules! reset_shape_state {
         () => {
@@ -341,6 +717,7 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
             cur_fill = None;
             cur_outline = None;
             cur_rotation = 0.0;
+            cur_shadow = None;
             cur_paragraphs = Vec::new();
             cur_runs = Vec::new();
             cur_align = TextAlign::Left;
@@ -360,6 +737,18 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
             in_rpr = false;
             in_solid_fill = false;
             solid_fill_ctx = 0;
+            in_grad_fill = false;
+            _grad_fill_ctx = 0;
+            grad_stops = Vec::new();
+            grad_angle = 0.0;
+            cur_grad_pos = 0.0;
+            in_gs = false;
+            in_effect_lst = false;
+            in_outer_shdw = false;
+            shdw_color = None;
+            shdw_blur = 0.0;
+            shdw_dist = 0.0;
+            shdw_dir = 0.0;
         };
     }
 
@@ -386,7 +775,17 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
                         shape_depth = depth;
                         reset_shape_state!();
                     }
+                    b"grpSp" if !in_sp && !in_pic && !in_cxn && !in_grp => {
+                        in_grp = true;
+                        grp_depth = depth;
+                        grp_off_x = 0.0;
+                        grp_off_y = 0.0;
+                    }
                     b"spPr" if in_sp || in_pic || in_cxn => {
+                        in_sp_pr = true;
+                    }
+                    b"grpSpPr" if in_grp && !in_sp && !in_pic && !in_cxn => {
+                        // Group shape properties - get offset
                         in_sp_pr = true;
                     }
                     b"xfrm" if in_sp_pr => {
@@ -410,8 +809,62 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
                             solid_fill_ctx = 2; // text color
                         } else if in_ln {
                             solid_fill_ctx = 1; // outline
+                        } else if in_outer_shdw {
+                            solid_fill_ctx = 3; // shadow color
                         } else if in_sp_pr {
                             solid_fill_ctx = 0; // shape fill
+                        }
+                    }
+                    b"gradFill" if in_sp_pr && !in_ln => {
+                        in_grad_fill = true;
+                        _grad_fill_ctx = 0;
+                        grad_stops.clear();
+                        grad_angle = 0.0;
+                    }
+                    b"gs" if in_grad_fill => {
+                        in_gs = true;
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"pos" {
+                                cur_grad_pos = String::from_utf8_lossy(&attr.value)
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0)
+                                    / 100000.0;
+                            }
+                        }
+                    }
+                    b"effectLst" if in_sp_pr || (in_sp || in_pic) => {
+                        in_effect_lst = true;
+                    }
+                    b"outerShdw" if in_effect_lst => {
+                        in_outer_shdw = true;
+                        shdw_color = None;
+                        shdw_blur = 0.0;
+                        shdw_dist = 0.0;
+                        shdw_dir = 0.0;
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"blurRad" => {
+                                    shdw_blur = String::from_utf8_lossy(&attr.value)
+                                        .parse::<f64>()
+                                        .unwrap_or(0.0)
+                                        / EMU_PER_PT;
+                                }
+                                b"dist" => {
+                                    shdw_dist = String::from_utf8_lossy(&attr.value)
+                                        .parse::<f64>()
+                                        .unwrap_or(0.0)
+                                        / EMU_PER_PT;
+                                }
+                                b"dir" => {
+                                    shdw_dir = String::from_utf8_lossy(&attr.value)
+                                        .parse::<f64>()
+                                        .unwrap_or(0.0)
+                                        / 60000.0
+                                        * std::f64::consts::PI
+                                        / 180.0;
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     b"pPr" if (in_sp || in_pic) && !in_sp_pr => {
@@ -539,15 +992,47 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
 
                 // Color elements in solidFill
                 if in_solid_fill {
-                    let color = parse_color_element(e);
+                    let color = parse_color_element_themed(e, theme_colors);
                     if let Some(c) = color {
                         match solid_fill_ctx {
-                            0 => cur_fill = Some(c),
+                            0 => cur_fill = Some(ShapeFill::Solid(c)),
                             1 => {
                                 cur_outline = Some((c, cur_outline.map_or(1.0, |o| o.1)));
                             }
                             2 => cur_color = Some(c),
+                            3 => shdw_color = Some(c), // shadow
                             _ => {}
+                        }
+                    }
+                }
+
+                // Gradient stop colors
+                if in_gs {
+                    let color = parse_color_element_themed(e, theme_colors);
+                    if let Some(c) = color {
+                        grad_stops.push(GradientStop {
+                            position: cur_grad_pos,
+                            color: c,
+                        });
+                    }
+                }
+
+                // Shadow colors (in outerShdw directly)
+                if in_outer_shdw && !in_solid_fill {
+                    let color = parse_color_element_themed(e, theme_colors);
+                    if let Some(c) = color {
+                        shdw_color = Some(c);
+                    }
+                }
+
+                // Linear gradient angle
+                if local == b"lin" && in_grad_fill {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"ang" {
+                            let ang_60k = String::from_utf8_lossy(&attr.value)
+                                .parse::<f64>()
+                                .unwrap_or(0.0);
+                            grad_angle = ang_60k / 60000.0 * std::f64::consts::PI / 180.0;
                         }
                     }
                 }
@@ -626,6 +1111,24 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
 
                 match local {
                     b"sp" if in_sp && depth == shape_depth => {
+                        // Build shadow from collected shadow data
+                        if in_outer_shdw || shdw_color.is_some() {
+                            let offset_x = shdw_dist * shdw_dir.cos();
+                            let offset_y = shdw_dist * shdw_dir.sin();
+                            cur_shadow = Some(ShadowEffect {
+                                color: shdw_color.unwrap_or(Color::rgb(0, 0, 0)),
+                                blur_radius: shdw_blur,
+                                offset_x,
+                                offset_y,
+                            });
+                        }
+                        // Finalize gradient fill if pending
+                        if cur_fill.is_none() && !grad_stops.is_empty() {
+                            cur_fill = Some(ShapeFill::Gradient {
+                                stops: grad_stops.clone(),
+                                angle: grad_angle,
+                            });
+                        }
                         // Emit shape
                         let content = if cur_paragraphs.is_empty() && cur_runs.is_empty() {
                             ShapeContent::Empty
@@ -635,14 +1138,15 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
                             }
                         };
                         shapes.push(SlideShape {
-                            x: cur_x,
-                            y: cur_y,
+                            x: cur_x + grp_off_x,
+                            y: cur_y + grp_off_y,
                             width: cur_w,
                             height: cur_h,
                             content,
-                            fill: cur_fill,
+                            fill: cur_fill.clone(),
                             outline: cur_outline,
                             rotation: cur_rotation,
+                            shadow: cur_shadow.clone(),
                         });
                         in_sp = false;
                     }
@@ -655,29 +1159,36 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
                             ShapeContent::Empty
                         };
                         shapes.push(SlideShape {
-                            x: cur_x,
-                            y: cur_y,
+                            x: cur_x + grp_off_x,
+                            y: cur_y + grp_off_y,
                             width: cur_w,
                             height: cur_h,
                             content,
-                            fill: cur_fill,
+                            fill: cur_fill.clone(),
                             outline: cur_outline,
                             rotation: cur_rotation,
+                            shadow: cur_shadow.clone(),
                         });
                         in_pic = false;
                     }
                     b"cxnSp" if in_cxn && depth == shape_depth => {
                         shapes.push(SlideShape {
-                            x: cur_x,
-                            y: cur_y,
+                            x: cur_x + grp_off_x,
+                            y: cur_y + grp_off_y,
                             width: cur_w,
                             height: cur_h,
                             content: ShapeContent::Connector,
                             fill: None,
                             outline: cur_outline.or(Some((Color::BLACK, 1.0))),
                             rotation: cur_rotation,
+                            shadow: None,
                         });
                         in_cxn = false;
+                    }
+                    b"grpSp" if in_grp && depth == grp_depth => {
+                        in_grp = false;
+                        grp_off_x = 0.0;
+                        grp_off_y = 0.0;
                     }
                     b"spPr" => {
                         in_sp_pr = false;
@@ -690,6 +1201,34 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
                     }
                     b"solidFill" => {
                         in_solid_fill = false;
+                    }
+                    b"gradFill" => {
+                        if in_sp_pr && !in_ln && !grad_stops.is_empty() {
+                            cur_fill = Some(ShapeFill::Gradient {
+                                stops: grad_stops.clone(),
+                                angle: grad_angle,
+                            });
+                        }
+                        in_grad_fill = false;
+                    }
+                    b"gs" => {
+                        in_gs = false;
+                    }
+                    b"effectLst" => {
+                        in_effect_lst = false;
+                    }
+                    b"outerShdw" => {
+                        if shdw_color.is_some() {
+                            let offset_x = shdw_dist * shdw_dir.cos();
+                            let offset_y = shdw_dist * shdw_dir.sin();
+                            cur_shadow = Some(ShadowEffect {
+                                color: shdw_color.unwrap_or(Color::rgb(0, 0, 0)),
+                                blur_radius: shdw_blur,
+                                offset_x,
+                                offset_y,
+                            });
+                        }
+                        in_outer_shdw = false;
                     }
                     b"rPr" => {
                         in_rpr = false;
@@ -747,8 +1286,8 @@ fn parse_slide_shapes(xml: &str) -> Vec<SlideShape> {
     shapes
 }
 
-/// XML要素から色を解析
-fn parse_color_element(e: &quick_xml::events::BytesStart) -> Option<Color> {
+/// XML要素から色を解析（テーマカラー対応版）
+fn parse_color_element_themed(e: &quick_xml::events::BytesStart, theme: &ThemeColors) -> Option<Color> {
     let local = e.local_name();
     match local.as_ref() {
         b"srgbClr" => {
@@ -760,21 +1299,45 @@ fn parse_color_element(e: &quick_xml::events::BytesStart) -> Option<Color> {
             None
         }
         b"schemeClr" => {
-            // Scheme colors - return a reasonable default based on common themes
             for attr in e.attributes().flatten() {
                 if attr.key.as_ref() == b"val" {
                     let scheme = String::from_utf8_lossy(&attr.value).to_string();
-                    return Some(match scheme.as_str() {
-                        "tx1" | "dk1" => Color::rgb(0, 0, 0),
-                        "bg1" | "lt1" => Color::rgb(255, 255, 255),
-                        "dk2" | "tx2" => Color::rgb(68, 84, 106),
-                        "lt2" | "bg2" => Color::rgb(237, 237, 237),
-                        "accent1" => Color::rgb(68, 114, 196),
-                        "accent2" => Color::rgb(237, 125, 49),
-                        "accent3" => Color::rgb(165, 165, 165),
-                        "accent4" => Color::rgb(255, 192, 0),
-                        "accent5" => Color::rgb(91, 155, 213),
-                        "accent6" => Color::rgb(112, 173, 71),
+                    return Some(theme.resolve(&scheme));
+                }
+            }
+            None
+        }
+        b"sysClr" => {
+            // System color - use lastClr attribute
+            for attr in e.attributes().flatten() {
+                if attr.key.as_ref() == b"lastClr" {
+                    return parse_hex_color(&String::from_utf8_lossy(&attr.value));
+                }
+            }
+            // Fallback to val
+            for attr in e.attributes().flatten() {
+                if attr.key.as_ref() == b"val" {
+                    let val = String::from_utf8_lossy(&attr.value).to_string();
+                    return Some(match val.as_str() {
+                        "windowText" => Color::rgb(0, 0, 0),
+                        "window" => Color::rgb(255, 255, 255),
+                        _ => Color::rgb(0, 0, 0),
+                    });
+                }
+            }
+            None
+        }
+        b"prstClr" => {
+            for attr in e.attributes().flatten() {
+                if attr.key.as_ref() == b"val" {
+                    let val = String::from_utf8_lossy(&attr.value).to_string();
+                    return Some(match val.as_str() {
+                        "black" => Color::rgb(0, 0, 0),
+                        "white" => Color::rgb(255, 255, 255),
+                        "red" => Color::rgb(255, 0, 0),
+                        "green" => Color::rgb(0, 128, 0),
+                        "blue" => Color::rgb(0, 0, 255),
+                        "yellow" => Color::rgb(255, 255, 0),
                         _ => Color::rgb(0, 0, 0),
                     });
                 }
@@ -783,6 +1346,12 @@ fn parse_color_element(e: &quick_xml::events::BytesStart) -> Option<Color> {
         }
         _ => None,
     }
+}
+
+/// XML要素から色を解析（デフォルトテーマ用互換関数）
+#[allow(dead_code)]
+fn parse_color_element(e: &quick_xml::events::BytesStart) -> Option<Color> {
+    parse_color_element_themed(e, &ThemeColors::default())
 }
 
 fn parse_hex_color(hex: &str) -> Option<Color> {
@@ -794,47 +1363,6 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
     } else {
         None
     }
-}
-
-/// スライド背景色を解析
-fn parse_slide_background(xml: &str) -> Option<Color> {
-    let mut reader = quick_xml::Reader::from_str(xml);
-    let mut buf = Vec::new();
-    let mut in_bg = false;
-    let mut in_solid_fill = false;
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(ref e)) => {
-                let local = e.local_name();
-                if local.as_ref() == b"bg" {
-                    in_bg = true;
-                } else if local.as_ref() == b"solidFill" && in_bg {
-                    in_solid_fill = true;
-                }
-            }
-            Ok(quick_xml::events::Event::Empty(ref e)) => {
-                if in_solid_fill {
-                    if let Some(c) = parse_color_element(e) {
-                        return Some(c);
-                    }
-                }
-            }
-            Ok(quick_xml::events::Event::End(ref e)) => {
-                let local = e.local_name();
-                if local.as_ref() == b"bg" {
-                    in_bg = false;
-                } else if local.as_ref() == b"solidFill" {
-                    in_solid_fill = false;
-                }
-            }
-            Ok(quick_xml::events::Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    None
 }
 
 /// リレーションシップXMLからrIdを解決
@@ -877,7 +1405,7 @@ fn resolve_relationship(rels_xml: &str, r_id: &str) -> Option<String> {
 fn render_slide_page(
     shapes: &[SlideShape],
     slide_size: &SlideSize,
-    bg_color: Option<Color>,
+    bg: Option<&SlideBg>,
 ) -> Page {
     let mut page = Page {
         width: slide_size.width,
@@ -886,32 +1414,97 @@ fn render_slide_page(
     };
 
     // 背景
-    if let Some(bg) = bg_color {
-        page.elements.push(PageElement::Rect {
-            x: 0.0,
-            y: 0.0,
-            width: slide_size.width,
-            height: slide_size.height,
-            fill: Some(bg),
-            stroke: None,
-            stroke_width: 0.0,
-        });
+    match bg {
+        Some(SlideBg::Solid(color)) => {
+            page.elements.push(PageElement::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: slide_size.width,
+                height: slide_size.height,
+                fill: Some(*color),
+                stroke: None,
+                stroke_width: 0.0,
+            });
+        }
+        Some(SlideBg::Gradient { stops, angle }) => {
+            page.elements.push(PageElement::GradientRect {
+                x: 0.0,
+                y: 0.0,
+                width: slide_size.width,
+                height: slide_size.height,
+                stops: stops.clone(),
+                gradient_type: GradientType::Linear(*angle),
+            });
+        }
+        Some(SlideBg::Image { data, mime_type }) => {
+            page.elements.push(PageElement::Image {
+                x: 0.0,
+                y: 0.0,
+                width: slide_size.width,
+                height: slide_size.height,
+                data: data.clone(),
+                mime_type: mime_type.clone(),
+            });
+        }
+        None => {}
     }
 
     for shape in shapes {
+        // Render shadow first (behind the shape)
+        if let Some(ref shadow) = shape.shadow {
+            let shadow_alpha = (shadow.color.a as f64 * 0.5) as u8;
+            page.elements.push(PageElement::Rect {
+                x: shape.x + shadow.offset_x,
+                y: shape.y + shadow.offset_y,
+                width: shape.width,
+                height: shape.height,
+                fill: Some(Color {
+                    r: shadow.color.r,
+                    g: shadow.color.g,
+                    b: shadow.color.b,
+                    a: shadow_alpha,
+                }),
+                stroke: None,
+                stroke_width: 0.0,
+            });
+        }
+
         match &shape.content {
             ShapeContent::TextBox { paragraphs } => {
-                // Shape fill rectangle
-                if let Some(fill) = shape.fill {
-                    page.elements.push(PageElement::Rect {
-                        x: shape.x,
-                        y: shape.y,
-                        width: shape.width,
-                        height: shape.height,
-                        fill: Some(fill),
-                        stroke: None,
-                        stroke_width: 0.0,
-                    });
+                // Shape fill
+                match &shape.fill {
+                    Some(ShapeFill::Solid(color)) => {
+                        page.elements.push(PageElement::Rect {
+                            x: shape.x,
+                            y: shape.y,
+                            width: shape.width,
+                            height: shape.height,
+                            fill: Some(*color),
+                            stroke: None,
+                            stroke_width: 0.0,
+                        });
+                    }
+                    Some(ShapeFill::Gradient { stops, angle }) => {
+                        page.elements.push(PageElement::GradientRect {
+                            x: shape.x,
+                            y: shape.y,
+                            width: shape.width,
+                            height: shape.height,
+                            stops: stops.clone(),
+                            gradient_type: GradientType::Linear(*angle),
+                        });
+                    }
+                    Some(ShapeFill::Image { data, mime_type }) => {
+                        page.elements.push(PageElement::Image {
+                            x: shape.x,
+                            y: shape.y,
+                            width: shape.width,
+                            height: shape.height,
+                            data: data.clone(),
+                            mime_type: mime_type.clone(),
+                        });
+                    }
+                    None => {}
                 }
 
                 // Shape outline
@@ -1043,26 +1636,51 @@ fn render_slide_page(
 
             ShapeContent::Empty => {
                 // Shape with fill but no content
-                if let Some(fill) = shape.fill {
-                    page.elements.push(PageElement::Rect {
-                        x: shape.x,
-                        y: shape.y,
-                        width: shape.width,
-                        height: shape.height,
-                        fill: Some(fill),
-                        stroke: shape.outline.map(|(c, _)| c),
-                        stroke_width: shape.outline.map(|(_, w)| w).unwrap_or(0.0),
-                    });
-                } else if let Some((color, width)) = shape.outline {
-                    page.elements.push(PageElement::Rect {
-                        x: shape.x,
-                        y: shape.y,
-                        width: shape.width,
-                        height: shape.height,
-                        fill: None,
-                        stroke: Some(color),
-                        stroke_width: width,
-                    });
+                match &shape.fill {
+                    Some(ShapeFill::Solid(color)) => {
+                        page.elements.push(PageElement::Rect {
+                            x: shape.x,
+                            y: shape.y,
+                            width: shape.width,
+                            height: shape.height,
+                            fill: Some(*color),
+                            stroke: shape.outline.map(|(c, _)| c),
+                            stroke_width: shape.outline.map(|(_, w)| w).unwrap_or(0.0),
+                        });
+                    }
+                    Some(ShapeFill::Gradient { stops, angle }) => {
+                        page.elements.push(PageElement::GradientRect {
+                            x: shape.x,
+                            y: shape.y,
+                            width: shape.width,
+                            height: shape.height,
+                            stops: stops.clone(),
+                            gradient_type: GradientType::Linear(*angle),
+                        });
+                    }
+                    Some(ShapeFill::Image { data, mime_type }) => {
+                        page.elements.push(PageElement::Image {
+                            x: shape.x,
+                            y: shape.y,
+                            width: shape.width,
+                            height: shape.height,
+                            data: data.clone(),
+                            mime_type: mime_type.clone(),
+                        });
+                    }
+                    None => {
+                        if let Some((color, width)) = shape.outline {
+                            page.elements.push(PageElement::Rect {
+                                x: shape.x,
+                                y: shape.y,
+                                width: shape.width,
+                                height: shape.height,
+                                fill: None,
+                                stroke: Some(color),
+                                stroke_width: width,
+                            });
+                        }
+                    }
                 }
             }
         }
