@@ -1,0 +1,20 @@
+# ビルド成果物
+target/
+www/pkg/
+*.wasm
+
+# フォントファイル（サイズが大きいためgitに含めない）
+fonts/*.ttf
+fonts/*.otf
+fonts/*.woff
+fonts/*.woff2
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
