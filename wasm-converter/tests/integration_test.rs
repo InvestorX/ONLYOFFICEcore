@@ -1133,3 +1133,45 @@ fn test_pdf_with_external_font_manager() {
     assert!(pdf.starts_with(b"%PDF"));
     assert!(pdf.len() > 100);
 }
+
+#[test]
+fn test_sample12_table_and_bg_rendering() {
+    let pptx_path = "/tmp/Sample_12.pptx";
+    if !std::path::Path::new(pptx_path).exists() {
+        println!("SKIP: {} not found", pptx_path);
+        return;
+    }
+    use std::io::Read;
+    let mut data = Vec::new();
+    std::fs::File::open(pptx_path).unwrap().read_to_end(&mut data).unwrap();
+
+    let doc = formats::convert_by_extension("pptx", &data).unwrap();
+    assert_eq!(doc.pages.len(), 12);
+
+    // Slide 6 (index 5) should have a table
+    use wasm_document_converter::converter::PageElement;
+    let slide6 = &doc.pages[5];
+    let has_table = slide6.elements.iter().any(|e| matches!(e, PageElement::TableBlock { .. }));
+    assert!(has_table, "Slide 6 should have a table");
+
+    // Slide 4 (index 3) should have gradient background
+    let slide4 = &doc.pages[3];
+    let has_gradient = slide4.elements.iter().any(|e| matches!(e, PageElement::GradientRect { .. }));
+    assert!(has_gradient, "Slide 4 should have gradient background");
+
+    // PDF should contain CIDToGIDMap
+    let fm = FontManager::new();
+    let pdf = pdf_writer::render_to_pdf_with_fonts(&doc, &fm);
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(pdf_str.contains("CIDToGIDMap"), "PDF should contain CIDToGIDMap");
+
+    // Slide 1 should have multiple font sizes
+    let slide1 = &doc.pages[0];
+    let mut font_sizes: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for elem in &slide1.elements {
+        if let PageElement::Text { style, .. } = elem {
+            font_sizes.insert((style.font_size * 10.0) as u32);
+        }
+    }
+    assert!(font_sizes.len() > 1, "Slide 1 should have multiple font sizes, got: {:?}", font_sizes);
+}

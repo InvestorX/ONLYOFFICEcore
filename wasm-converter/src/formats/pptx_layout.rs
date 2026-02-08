@@ -82,6 +82,9 @@ impl DocumentConverter for PptxConverter {
                 &slide_xml, &rels, &mut archive, &slide_size,
             );
 
+            // テーブルを検出して描画要素を収集
+            let table_elements = detect_and_render_tables(&slide_xml, &theme_colors);
+
             let mut page = render_slide_page(&resolved_shapes, &slide_size, bg.as_ref());
 
             // チャート要素を追加
@@ -89,6 +92,9 @@ impl DocumentConverter for PptxConverter {
 
             // SmartArt要素を追加
             page.elements.extend(smartart_elements);
+
+            // テーブル要素を追加
+            page.elements.extend(table_elements);
 
             doc.pages.push(page);
         }
@@ -523,6 +529,7 @@ fn parse_slide_background_full(
     let mut cur_grad_pos: f64 = 0.0;
     let mut blip_r_id = String::new();
     let mut in_gs = false;
+    let mut pending_gs_color: Option<Color> = None;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -547,12 +554,25 @@ fn parse_slide_background_full(
                     }
                     b"gs" if in_grad_fill => {
                         in_gs = true;
+                        pending_gs_color = None;
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"pos" {
                                 cur_grad_pos = String::from_utf8_lossy(&attr.value)
                                     .parse::<f64>()
                                     .unwrap_or(0.0)
                                     / 100000.0;
+                            }
+                        }
+                    }
+                    // Handle srgbClr/schemeClr as Start elements (with child modifiers)
+                    b"srgbClr" | b"schemeClr" if in_solid_fill || in_gs => {
+                        let color = parse_color_element_themed(e, theme_colors);
+                        if let Some(c) = color {
+                            if in_solid_fill {
+                                return Some(SlideBg::Solid(c));
+                            }
+                            if in_gs {
+                                pending_gs_color = Some(c);
                             }
                         }
                     }
@@ -640,7 +660,16 @@ fn parse_slide_background_full(
                         in_grad_fill = false;
                     }
                     b"blipFill" => in_blip_fill = false,
-                    b"gs" => in_gs = false,
+                    b"gs" => {
+                        // Push pending gradient stop color from Start-element schemeClr/srgbClr
+                        if let Some(c) = pending_gs_color.take() {
+                            grad_stops.push(GradientStop {
+                                position: cur_grad_pos,
+                                color: c,
+                            });
+                        }
+                        in_gs = false;
+                    }
                     _ => {}
                 }
             }
@@ -1067,6 +1096,17 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                     b"t" if (in_sp || in_pic) && !in_sp_pr => {
                         in_text = true;
                     }
+                    b"br" if (in_sp || in_pic) && !in_sp_pr => {
+                        // Line break Start element - insert newline run
+                        cur_runs.push(TextRun {
+                            text: "\n".to_string(),
+                            font_size: cur_font_size,
+                            bold: cur_bold,
+                            italic: cur_italic,
+                            color: cur_color,
+                            font_name: cur_font_name.clone(),
+                        });
+                    }
                     b"p" if (in_sp || in_pic) && !in_sp_pr && depth > shape_depth + 1 => {
                         // New paragraph in text body
                         cur_runs.clear();
@@ -1315,6 +1355,18 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                     } else {
                         cur_bullet = Some("•".to_string());
                     }
+                }
+
+                // Line break <a:br/> (empty variant) - insert newline in text
+                if local == b"br" && (in_sp || in_pic) && !in_sp_pr {
+                    cur_runs.push(TextRun {
+                        text: "\n".to_string(),
+                        font_size: cur_font_size,
+                        bold: cur_bold,
+                        italic: cur_italic,
+                        color: cur_color,
+                        font_name: cur_font_name.clone(),
+                    });
                 }
 
                 // Image blip (empty variant)
@@ -2137,6 +2189,204 @@ fn find_diagram_frames(xml: &str, rels_xml: &str) -> Vec<(String, f64, f64, f64,
     results
 }
 
+/// graphicFrame内のテーブル(<a:tbl>)を検出して描画要素に変換
+fn detect_and_render_tables(
+    xml: &str,
+    theme_colors: &ThemeColors,
+) -> Vec<PageElement> {
+    use crate::converter::{Table, TableCell};
+
+    let mut elements = Vec::new();
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut in_graphic_frame = false;
+    let mut in_tbl = false;
+    let mut in_tr = false;
+    let mut in_tc = false;
+    let mut in_tc_text = false;
+    let mut in_xfrm = false;
+    let mut frame_x = 0.0f64;
+    let mut frame_y = 0.0f64;
+    let mut frame_w = 0.0f64;
+    let mut _frame_h = 0.0f64;
+    let mut col_widths: Vec<f64> = Vec::new();
+    let mut rows: Vec<Vec<TableCell>> = Vec::new();
+    let mut current_row: Vec<TableCell> = Vec::new();
+    let mut current_cell_text = String::new();
+    let mut cell_fill: Option<Color> = None;
+    let mut in_tc_pr = false;
+    let mut in_solid_fill = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::Start(ref e)) => {
+                let local = e.local_name();
+                match local.as_ref() {
+                    b"graphicFrame" => {
+                        in_graphic_frame = true;
+                        frame_x = 0.0;
+                        frame_y = 0.0;
+                        frame_w = 0.0;
+                        _frame_h = 0.0;
+                        col_widths.clear();
+                        rows.clear();
+                    }
+                    b"xfrm" if in_graphic_frame && !in_tbl => {
+                        in_xfrm = true;
+                    }
+                    b"tbl" if in_graphic_frame => {
+                        in_tbl = true;
+                        col_widths.clear();
+                        rows.clear();
+                    }
+                    b"gridCol" if in_tbl && !in_tr => {
+                        // gridCol as Start element (has child extLst)
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"w" {
+                                let w = String::from_utf8_lossy(&attr.value)
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0) / EMU_PER_PT;
+                                col_widths.push(w);
+                            }
+                        }
+                    }
+                    b"tr" if in_tbl => {
+                        in_tr = true;
+                        current_row.clear();
+                    }
+                    b"tc" if in_tr => {
+                        in_tc = true;
+                        current_cell_text.clear();
+                        cell_fill = None;
+                    }
+                    b"tcPr" if in_tc => {
+                        in_tc_pr = true;
+                    }
+                    b"solidFill" if in_tc_pr => {
+                        in_solid_fill = true;
+                    }
+                    b"t" if in_tc => {
+                        in_tc_text = true;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(ref e)) => {
+                let local = e.local_name();
+                match local.as_ref() {
+                    b"off" if in_xfrm && in_graphic_frame => {
+                        for attr in e.attributes().flatten() {
+                            let key_bytes = attr.key.as_ref();
+                            let val = String::from_utf8_lossy(&attr.value)
+                                .parse::<f64>()
+                                .unwrap_or(0.0) / EMU_PER_PT;
+                            if key_bytes == b"x" { frame_x = val; }
+                            if key_bytes == b"y" { frame_y = val; }
+                        }
+                    }
+                    b"ext" if in_xfrm && in_graphic_frame => {
+                        for attr in e.attributes().flatten() {
+                            let key_bytes = attr.key.as_ref();
+                            let val = String::from_utf8_lossy(&attr.value)
+                                .parse::<f64>()
+                                .unwrap_or(0.0) / EMU_PER_PT;
+                            if key_bytes == b"cx" { frame_w = val; }
+                            if key_bytes == b"cy" { _frame_h = val; }
+                        }
+                    }
+                    b"gridCol" if in_tbl && !in_tr => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"w" {
+                                let w = String::from_utf8_lossy(&attr.value)
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0) / EMU_PER_PT;
+                                col_widths.push(w);
+                            }
+                        }
+                    }
+                    _ => {
+                        // Color elements in solidFill within tcPr
+                        if in_solid_fill && in_tc_pr {
+                            let color = parse_color_element_themed(e, theme_colors);
+                            if let Some(c) = color {
+                                cell_fill = Some(c);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::Text(ref e)) => {
+                if in_tc_text {
+                    if let Ok(text) = e.unescape() {
+                        current_cell_text.push_str(&text);
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::End(ref e)) => {
+                let local = e.local_name();
+                match local.as_ref() {
+                    b"graphicFrame" => {
+                        in_graphic_frame = false;
+                        in_tbl = false;
+                    }
+                    b"tbl" => {
+                        // Emit table element when tbl End is reached
+                        if !rows.is_empty() && !col_widths.is_empty() {
+                            elements.push(PageElement::TableBlock {
+                                x: frame_x,
+                                y: frame_y,
+                                width: frame_w,
+                                table: Table {
+                                    rows: rows.clone(),
+                                    column_widths: col_widths.clone(),
+                                },
+                            });
+                        }
+                        in_tbl = false;
+                    }
+                    b"tr" => {
+                        if in_tr && !current_row.is_empty() {
+                            rows.push(current_row.clone());
+                        }
+                        in_tr = false;
+                    }
+                    b"tc" => {
+                        if in_tc {
+                            let mut cell = TableCell::new(&current_cell_text);
+                            if let Some(c) = cell_fill {
+                                cell.style.color = c;
+                            }
+                            current_row.push(cell);
+                        }
+                        in_tc = false;
+                        in_tc_pr = false;
+                        in_solid_fill = false;
+                    }
+                    b"tcPr" => {
+                        in_tc_pr = false;
+                    }
+                    b"solidFill" if in_tc_pr => {
+                        in_solid_fill = false;
+                    }
+                    b"t" => {
+                        in_tc_text = false;
+                    }
+                    b"xfrm" => {
+                        in_xfrm = false;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    elements
+}
+
 // ── Page rendering ──
 
 /// 解析済みシェイプからページを構築
@@ -2431,61 +2681,143 @@ fn render_slide_page(
 
                 for para in paragraphs {
                     let indent = para.level as f64 * 18.0;
-
-                    // Add bullet if present
-                    let mut para_text = String::new();
-                    if let Some(ref bullet) = para.bullet {
-                        para_text.push_str(bullet);
-                        para_text.push(' ');
+                    let available_width = shape.width - margin_left - margin_right - indent;
+                    if available_width <= 0.0 {
+                        continue;
                     }
 
-                    // Concatenate all run texts to get full paragraph
-                    for run in &para.runs {
-                        para_text.push_str(&run.text);
-                    }
-
-                    if !para_text.trim().is_empty() {
-                        // Get font size from first run for line height calculation
-                        let first_run = para.runs.first();
-                        let font_size = first_run.map_or(18.0, |r| r.font_size);
-                        let line_height = font_size * 1.3;
-
-                        // Word-wrap the text within the shape width
-                        let available_width = shape.width - margin_left - margin_right - indent;
-                        let lines = wrap_text(&para_text, available_width, font_size);
-
-                        for line in &lines {
-                            if text_y + font_size > shape.y + shape.height {
-                                break; // Clip to shape bounds
-                            }
-
-                            // Render each run in the line with its own style
-                            // For now, use first run's style for the entire line (simplified approach)
-                            // TODO: Support mixed formatting within a line
-                            let bold = first_run.map_or(false, |r| r.bold);
-                            let italic = first_run.map_or(false, |r| r.italic);
-                            let color = first_run.and_then(|r| r.color).unwrap_or(Color::BLACK);
-
-                            page.elements.push(PageElement::Text {
-                                x: shape.x + margin_left + indent,
-                                y: text_y,
-                                width: available_width,
-                                text: line.clone(),
-                                style: FontStyle {
-                                    font_size,
-                                    bold,
-                                    italic,
-                                    color,
-                                    ..FontStyle::default()
-                                },
-                                align: para.align,
-                            });
-                            text_y += line_height;
+                    // Collect run segments for this paragraph, handling newlines
+                    let mut segments: Vec<(&TextRun, &str)> = Vec::new();
+                    let mut has_bullet = false;
+                    if para.bullet.is_some() {
+                        if para.runs.first().is_some() {
+                            has_bullet = true;
                         }
-                    } else {
+                    }
+
+                    for run in &para.runs {
+                        if run.text.contains('\n') {
+                            // Split by newlines, each sub-part is a segment
+                            for (i, part) in run.text.split('\n').enumerate() {
+                                if i > 0 {
+                                    // Newline: flush the current line
+                                    segments.push((run, "\n"));
+                                }
+                                if !part.is_empty() {
+                                    segments.push((run, part));
+                                }
+                            }
+                        } else {
+                            segments.push((run, &run.text));
+                        }
+                    }
+
+                    // Check if any visible text
+                    let has_text = segments.iter().any(|(_, t)| !t.is_empty() && *t != "\n");
+                    if !has_text && !has_bullet {
                         // Empty paragraph - add line spacing
                         let font_size = para.runs.first().map_or(18.0, |r| r.font_size);
                         text_y += font_size * 0.8;
+                        continue;
+                    }
+
+                    // Build lines from segments, wrapping as needed
+                    let mut current_line_x = shape.x + margin_left + indent;
+                    let mut current_line_width = 0.0;
+                    let line_start_x = current_line_x;
+                    let first_font_size = para.runs.first().map_or(18.0, |r| r.font_size);
+                    let mut line_height = first_font_size * 1.3;
+                    let mut line_started = false;
+
+                    // Output bullet first if present
+                    if has_bullet {
+                        if let Some(ref bullet) = para.bullet {
+                            let bullet_run = para.runs.first().unwrap();
+                            let fs = bullet_run.font_size;
+                            let bullet_with_space = format!("{} ", bullet);
+                            let bw = estimate_run_width(&bullet_with_space, fs);
+                            if text_y + fs <= shape.y + shape.height {
+                                page.elements.push(PageElement::Text {
+                                    x: current_line_x,
+                                    y: text_y,
+                                    width: bw,
+                                    text: bullet_with_space,
+                                    style: FontStyle {
+                                        font_size: fs,
+                                        bold: bullet_run.bold,
+                                        italic: bullet_run.italic,
+                                        color: bullet_run.color.unwrap_or(Color::BLACK),
+                                        ..FontStyle::default()
+                                    },
+                                    align: para.align,
+                                });
+                            }
+                            current_line_x += bw;
+                            current_line_width += bw;
+                            line_started = true;
+                        }
+                    }
+
+                    for (run, text) in &segments {
+                        if *text == "\n" {
+                            // Explicit line break
+                            text_y += line_height;
+                            current_line_x = line_start_x;
+                            current_line_width = 0.0;
+                            line_height = run.font_size * 1.3;
+                            line_started = false;
+                            continue;
+                        }
+                        if text.is_empty() {
+                            continue;
+                        }
+
+                        let fs = run.font_size;
+                        line_height = line_height.max(fs * 1.3);
+
+                        // Wrap this run's text within available width
+                        let remaining_width = available_width - current_line_width;
+                        let run_lines = wrap_text(text, remaining_width, fs);
+
+                        for (li, line_text) in run_lines.iter().enumerate() {
+                            if li > 0 {
+                                // Wrapped to next line
+                                text_y += line_height;
+                                current_line_x = line_start_x;
+                                current_line_width = 0.0;
+                                line_height = fs * 1.3;
+                            }
+
+                            if text_y + fs > shape.y + shape.height {
+                                break; // Clip to shape bounds
+                            }
+
+                            let tw = estimate_run_width(line_text, fs);
+                            if !line_text.trim().is_empty() {
+                                page.elements.push(PageElement::Text {
+                                    x: current_line_x,
+                                    y: text_y,
+                                    width: tw,
+                                    text: line_text.clone(),
+                                    style: FontStyle {
+                                        font_size: fs,
+                                        bold: run.bold,
+                                        italic: run.italic,
+                                        color: run.color.unwrap_or(Color::BLACK),
+                                        ..FontStyle::default()
+                                    },
+                                    align: para.align,
+                                });
+                                line_started = true;
+                            }
+                            current_line_x += tw;
+                            current_line_width += tw;
+                        }
+                    }
+
+                    // Advance to next paragraph
+                    if line_started || has_text {
+                        text_y += line_height;
                     }
                 }
             }
@@ -2604,38 +2936,55 @@ fn wrap_text(text: &str, available_width: f64, font_size: f64) -> Vec<String> {
     if text.is_empty() {
         return vec![];
     }
+    if available_width <= 0.0 {
+        return vec![text.to_string()];
+    }
 
-    // Approximate character width: CJK ≈ font_size, Latin ≈ 0.5 * font_size
-    let mut lines = Vec::new();
-    let mut current_line = String::new();
-    let mut current_width = 0.0;
+    // Handle explicit newlines first
+    let mut result = Vec::new();
+    for segment in text.split('\n') {
+        // Approximate character width: CJK ≈ font_size, Latin ≈ 0.5 * font_size
+        let mut current_line = String::new();
+        let mut current_width = 0.0;
 
-    for ch in text.chars() {
-        let char_width = if ch.is_ascii() {
-            font_size * 0.5
-        } else {
-            font_size * 1.0
-        };
+        for ch in segment.chars() {
+            let char_width = if ch.is_ascii() {
+                font_size * 0.5
+            } else {
+                font_size * 1.0
+            };
 
-        if current_width + char_width > available_width && !current_line.is_empty() {
-            lines.push(current_line.clone());
-            current_line.clear();
-            current_width = 0.0;
+            if current_width + char_width > available_width && !current_line.is_empty() {
+                result.push(current_line.clone());
+                current_line.clear();
+                current_width = 0.0;
+            }
+
+            current_line.push(ch);
+            current_width += char_width;
         }
 
-        current_line.push(ch);
-        current_width += char_width;
+        result.push(current_line);
     }
 
-    if !current_line.is_empty() {
-        lines.push(current_line);
+    if result.is_empty() {
+        result.push(String::new());
     }
 
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
+    result
+}
 
-    lines
+/// テキスト幅を概算（フォントサイズベース）
+fn estimate_run_width(text: &str, font_size: f64) -> f64 {
+    let mut width = 0.0;
+    for ch in text.chars() {
+        if ch.is_ascii() {
+            width += font_size * 0.5;
+        } else {
+            width += font_size;
+        }
+    }
+    width
 }
 
 /// プリセットジオメトリ名からパスコマンドを生成

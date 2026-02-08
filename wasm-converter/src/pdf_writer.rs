@@ -57,6 +57,9 @@ impl<'a> PdfWriter<'a> {
         let descriptor_id = self.alloc_id();
         let tounicode_id = self.alloc_id();
 
+        // CIDToGIDMap用のID
+        let cid_to_gid_map_id = self.alloc_id();
+
         // フォント埋め込み用のID（フォントデータがある場合）
         let font_file_id = if has_font {
             Some(self.alloc_id())
@@ -110,13 +113,26 @@ impl<'a> PdfWriter<'a> {
             .into_bytes(),
         );
 
+        // CIDToGIDMapストリームを生成（フォントのcmapテーブルに基づく）
+        {
+            let cid_to_gid_data = self.build_cid_to_gid_map();
+            let mut stream_data = format!(
+                "<< /Length {} >>\nstream\n",
+                cid_to_gid_data.len()
+            ).into_bytes();
+            stream_data.extend_from_slice(&cid_to_gid_data);
+            stream_data.extend_from_slice(b"\nendstream");
+            self.add_object(cid_to_gid_map_id, stream_data);
+        }
+
         // CIDFont
         let mut cid_font_dict = format!(
             "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /NotoSansJP \
              /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
              /DW 1000 \
-             /FontDescriptor {} 0 R",
-            descriptor_id
+             /FontDescriptor {} 0 R \
+             /CIDToGIDMap {} 0 R",
+            descriptor_id, cid_to_gid_map_id
         );
         cid_font_dict.push_str(" >>");
         self.add_object(cid_font_id, cid_font_dict.into_bytes());
@@ -728,8 +744,6 @@ impl<'a> PdfWriter<'a> {
     /// テキストをPDF用UTF-16BEヘックス文字列に変換
     fn text_to_pdf_hex(&self, text: &str) -> String {
         let mut hex = String::new();
-        // BOM
-        hex.push_str("FEFF");
         for ch in text.chars() {
             let code = ch as u32;
             if code <= 0xFFFF {
@@ -853,6 +867,29 @@ impl<'a> PdfWriter<'a> {
          end\n\
          end"
             .to_string()
+    }
+
+    /// CIDToGIDMapストリームを生成
+    /// フォントのcmapテーブルからUnicodeコードポイント(CID)→グリフID(GID)のマッピングを構築
+    fn build_cid_to_gid_map(&self) -> Vec<u8> {
+        use ab_glyph::{Font, FontRef};
+        // 65536 entries × 2 bytes each = 131072 bytes
+        let mut map = vec![0u8; 65536 * 2];
+
+        if let Some(font_data) = self.font_manager.best_font_data() {
+            if let Ok(font) = FontRef::try_from_slice(font_data) {
+                for code_point in 0u32..=0xFFFF {
+                    if let Some(ch) = char::from_u32(code_point) {
+                        let glyph_id = font.glyph_id(ch);
+                        let gid = glyph_id.0;
+                        let offset = (code_point as usize) * 2;
+                        map[offset] = (gid >> 8) as u8;
+                        map[offset + 1] = (gid & 0xFF) as u8;
+                    }
+                }
+            }
+        }
+        map
     }
 
     /// PDFバイト列をシリアライズ
