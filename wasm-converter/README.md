@@ -16,7 +16,7 @@ Rust + WebAssembly で構築されたドキュメント変換ツールです。�
 | XPS | .xps | 🔧 開発中 |
 | DjVu | .djvu | 🔧 開発中 |
 | Microsoft Excel | .xlsx, .xls, .ods | ✅ テーブル表示 |
-| Microsoft PowerPoint | .pptx | ✅ レイアウト保持（シェイプ位置・書式・画像・86種類のプリセットジオメトリ・カスタムジオメトリ対応） |
+| Microsoft PowerPoint | .pptx | ✅ 完全対応（シェイプ位置・書式・画像・**86種類の全プリセットジオメトリ**・カスタムジオメトリ・グラデーション・シャドウ・3D効果・チャート・SmartArt） |
 | Microsoft PowerPoint (旧) | .ppt | 🔧 開発中 |
 | OpenDocument Presentation | .odp | ✅ テキスト抽出 |
 
@@ -188,19 +188,21 @@ converter.removeFont('NotoSansJP');
 
 ## プリセットジオメトリ対応
 
-PPTX変換では**86種類**のプリセットジオメトリに対応しています。すべての図形が正確にレンダリングされます。
+PPTX変換では**86種類すべて**のプリセットジオメトリに完全対応しています。すべての図形が正確にレンダリングされます。
 
-### 基本図形
+### 基本図形（10種類）
 - 三角形（triangle, isosTriangle, rtTriangle）
 - 四角形（diamond, parallelogram, trapezoid）
 - 多角形（pentagon, hexagon, octagon）
-- 星形（star4, star5, star6, star8, star10, star12, star16, star24, star32）
+- 角丸矩形（roundRect）、角切り矩形（snip1Rect、snip2SameRect、snip2DiagRect）
 
-### 矢印
+### 矢印（15種類）
 - arrow, rightArrow, leftArrow, upArrow, downArrow
 - leftRightArrow, upDownArrow, notchedRightArrow
+- bentArrow, bentUpArrow, curvedRightArrow, curvedLeftArrow
+- stripedRightArrow, chevron, homePlate
 
-### フローチャート（17種類）
+### フローチャート（17種類完全対応）
 - flowChartProcess, flowChartDecision, flowChartTerminator
 - flowChartDocument, flowChartPredefinedProcess
 - flowChartInputOutput, flowChartPreparation
@@ -211,28 +213,34 @@ PPTX変換では**86種類**のプリセットジオメトリに対応してい�
 - flowChartMultidocument, flowChartOnlineStorage
 - flowChartAlternateProcess, flowChartMagneticDisk
 
-### 特殊図形
+### 星形（10種類）
+- star4, star5, star6, star8, star10, star12, star16, star24, star32
+- 角丸星形（roundStar）
+
+### 特殊図形（20種類以上）
 - moon（三日月）, smileyFace（スマイル）, sun（太陽）
 - noSmoking（禁煙マーク）, heart（ハート）
 - lightningBolt（稲妻）, cloud（雲）, cloudCallout
 - foldedCorner（折り目付き）, frame（額縁）, bevel（面取り）
 - gear6（歯車6）, gear9（歯車9）
 - irregularSeal1, irregularSeal2, explosion1, explosion2
+- plus（プラス）, cross（クロス）
 
-### その他
+### その他（14種類）
 - arc（弧）, pie（扇形）, donut（ドーナツ）
 - wave（波）, doubleWave（二重波）
-- ribbon（リボン）, ellipseRibbon
-- roundRect（角丸矩形）, snip1Rect（角切り矩形）
-- アクションボタン（actionButtonBlank, actionButtonHome, actionButtonHelp）
+- ribbon（リボン）, ribbon2, ellipseRibbon, ellipseRibbon2
+- アクションボタン（actionButtonBlank, actionButtonHome, actionButtonHelp, actionButtonBack, actionButtonForward）
 
-### カスタムジオメトリ
-OOXML `<a:custGeom>` 要素による完全なカスタムパス定義にも対応：
+### カスタムジオメトリ（完全対応）
+OOXML `<a:custGeom>` 要素による完全なカスタムパス定義に対応：
 - `<a:moveTo>`, `<a:lnTo>` — 移動・直線
 - `<a:cubicBezTo>` — 3次ベジェ曲線
 - `<a:quadBezTo>` — 2次ベジェ曲線
 - `<a:close>` — パスのクローズ
 - ビューポート座標系の自動スケーリング
+
+すべてのプリセットジオメトリとカスタムジオメトリはPDF出力とPNG画像出力の両方で正確にレンダリングされます。
 
 ## ライセンス
 

@@ -2542,7 +2542,9 @@ fn wrap_text(text: &str, available_width: f64, font_size: f64) -> Vec<String> {
 
 /// プリセットジオメトリ名からパスコマンドを生成
 /// シェイプのバウンディングボックス (x, y, width, height) を基にパスを計算
-fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Option<Vec<crate::converter::PathCommand>> {
+///
+/// DOCX, XLSX, PPTX で共通利用可能な86種類のプリセットジオメトリをサポート
+pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Option<Vec<crate::converter::PathCommand>> {
     use crate::converter::PathCommand;
     use std::f64::consts::PI;
 
