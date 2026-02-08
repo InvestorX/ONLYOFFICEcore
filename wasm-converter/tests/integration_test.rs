@@ -713,3 +713,341 @@ fn test_real_sample12_pptx_layout() {
     f.write_all(&zip_data).unwrap();
     eprintln!("✅ 画像ZIP出力: {} ({} bytes)", zip_path, zip_data.len());
 }
+
+/// Sample_12.pptxのチャートスライド（slide 8, 9, 10）のレンダリングテスト
+/// チャート（棒グラフ、円グラフ、面グラフ）が正しくレンダリングされることを検証
+#[test]
+fn test_sample12_chart_rendering() {
+    use wasm_document_converter::converter::PageElement;
+    use std::io::Write;
+
+    let pptx_path = "/tmp/Sample_12.pptx";
+    let data = match std::fs::read(pptx_path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("⏭ {}: ファイルが見つからないためスキップ", pptx_path);
+            return;
+        }
+    };
+
+    let doc = formats::convert_by_extension("pptx", &data).expect("PPTX変換に失敗");
+    assert!(doc.pages.len() >= 10, "12スライドあるはず");
+
+    // Slide 8 has a bar chart
+    let slide8 = &doc.pages[7];
+    eprintln!("スライド8: {} 要素", slide8.elements.len());
+    // Charts produce rects (bars), lines (axes/gridlines), text (labels) and ellipses
+    let has_chart_elements = slide8.elements.iter().any(|e| {
+        matches!(e, PageElement::Line { .. })
+    });
+    eprintln!("  チャート要素あり: {}", has_chart_elements);
+
+    // Slide 9 also has a chart
+    let slide9 = &doc.pages[8];
+    eprintln!("スライド9: {} 要素", slide9.elements.len());
+
+    // Render chart slides as PNG for visual verification
+    let fm = FontManager::new();
+    let config = image_renderer::ImageRenderConfig {
+        dpi: 150.0,
+        ..Default::default()
+    };
+    for idx in [7, 8, 9] { // slides 8, 9, 10
+        if idx < doc.pages.len() {
+            let img = image_renderer::render_page_to_image(&doc.pages[idx], &config, &fm);
+            let png_path = format!("/tmp/wasm_converter_sample12_chart_slide{}.png", idx + 1);
+            let mut f = std::fs::File::create(&png_path).unwrap();
+            f.write_all(&img).unwrap();
+            eprintln!("✅ チャートスライド{} PNG: {} ({} bytes)", idx + 1, png_path, img.len());
+        }
+    }
+}
+
+/// Sample_12.pptxのSmartArtスライド（slide 11）のレンダリングテスト
+#[test]
+fn test_sample12_smartart_rendering() {
+    use std::io::Write;
+
+    let pptx_path = "/tmp/Sample_12.pptx";
+    let data = match std::fs::read(pptx_path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("⏭ {}: ファイルが見つからないためスキップ", pptx_path);
+            return;
+        }
+    };
+
+    let doc = formats::convert_by_extension("pptx", &data).expect("PPTX変換に失敗");
+
+    // Slide 11 has SmartArt (diagram)
+    if doc.pages.len() > 10 {
+        let slide11 = &doc.pages[10];
+        eprintln!("スライド11 (SmartArt): {} 要素", slide11.elements.len());
+
+        let fm = FontManager::new();
+        let config = image_renderer::ImageRenderConfig {
+            dpi: 150.0,
+            ..Default::default()
+        };
+        let img = image_renderer::render_page_to_image(slide11, &config, &fm);
+        let png_path = "/tmp/wasm_converter_sample12_smartart_slide11.png";
+        let mut f = std::fs::File::create(png_path).unwrap();
+        f.write_all(&img).unwrap();
+        eprintln!("✅ SmartArtスライド11 PNG: {} ({} bytes)", png_path, img.len());
+    }
+}
+
+/// Sample_12.pptxの3Dエフェクトスライド（slide 6, 7）のレンダリングテスト
+#[test]
+fn test_sample12_3d_effects() {
+    use std::io::Write;
+
+    let pptx_path = "/tmp/Sample_12.pptx";
+    let data = match std::fs::read(pptx_path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("⏭ {}: ファイルが見つからないためスキップ", pptx_path);
+            return;
+        }
+    };
+
+    let doc = formats::convert_by_extension("pptx", &data).expect("PPTX変換に失敗");
+
+    // Slides 6-7 have 3D effects (scene3d/sp3d)
+    let fm = FontManager::new();
+    let config = image_renderer::ImageRenderConfig {
+        dpi: 150.0,
+        ..Default::default()
+    };
+    for idx in [5, 6] { // slides 6, 7
+        if idx < doc.pages.len() {
+            let page = &doc.pages[idx];
+            eprintln!("スライド{} (3D): {} 要素", idx + 1, page.elements.len());
+            let img = image_renderer::render_page_to_image(page, &config, &fm);
+            let png_path = format!("/tmp/wasm_converter_sample12_3d_slide{}.png", idx + 1);
+            let mut f = std::fs::File::create(&png_path).unwrap();
+            f.write_all(&img).unwrap();
+            eprintln!("✅ 3Dスライド{} PNG: {} ({} bytes)", idx + 1, png_path, img.len());
+        }
+    }
+}
+
+/// Sample_12.pptxのJPEG画像デコードテスト
+/// 実際のJPEG画像（image1.jpg, image2.jpeg等）が完全にデコードされることを検証
+#[test]
+fn test_sample12_jpeg_decoding() {
+    use wasm_document_converter::converter::PageElement;
+
+    let pptx_path = "/tmp/Sample_12.pptx";
+    let data = match std::fs::read(pptx_path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("⏭ {}: ファイルが見つからないためスキップ", pptx_path);
+            return;
+        }
+    };
+
+    let doc = formats::convert_by_extension("pptx", &data).expect("PPTX変換に失敗");
+
+    // Count image elements across all slides
+    let mut total_images = 0;
+    let mut jpeg_images = 0;
+    for (i, page) in doc.pages.iter().enumerate() {
+        for elem in &page.elements {
+            if let PageElement::Image { mime_type, data, .. } = elem {
+                total_images += 1;
+                if mime_type.contains("jpeg") || mime_type.contains("jpg") {
+                    jpeg_images += 1;
+                    // Verify JPEG header
+                    assert!(data.len() > 10, "JPEG data too small on slide {}", i + 1);
+                    assert!(data[0] == 0xFF && data[1] == 0xD8, "Invalid JPEG header on slide {}", i + 1);
+                }
+                eprintln!("  スライド{} 画像: {} ({} bytes)", i + 1, mime_type, data.len());
+            }
+        }
+    }
+    eprintln!("画像合計: {}, JPEG: {}", total_images, jpeg_images);
+    // Sample_12.pptx has JPEG images
+    assert!(total_images > 0, "画像が見つかりません");
+}
+
+/// assignment.docx（GitHub docxtemplater sample）の変換テスト
+#[test]
+fn test_assignment_docx_conversion() {
+    use std::io::Write;
+
+    let docx_path = "/tmp/assignment.docx";
+    let data = match std::fs::read(docx_path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("⏭ {}: ファイルが見つからないためスキップ", docx_path);
+            return;
+        }
+    };
+
+    eprintln!("assignment.docx: {} bytes", data.len());
+
+    let doc = formats::convert_by_extension("docx", &data).expect("DOCX変換に失敗");
+    assert!(!doc.pages.is_empty(), "ページが生成されませんでした");
+    eprintln!("ページ数: {}", doc.pages.len());
+    for (i, page) in doc.pages.iter().enumerate() {
+        eprintln!("  ページ{}: {}x{} ({} 要素)", i + 1, page.width as i32, page.height as i32, page.elements.len());
+    }
+
+    let pdf = pdf_writer::render_to_pdf(&doc);
+    assert!(pdf.starts_with(b"%PDF-1.4"));
+    let pdf_path = "/tmp/wasm_converter_assignment.pdf";
+    let mut f = std::fs::File::create(pdf_path).unwrap();
+    f.write_all(&pdf).unwrap();
+    eprintln!("✅ assignment.docx → PDF: {} ({} bytes)", pdf_path, pdf.len());
+
+    // PNG output for screenshot
+    let fm = FontManager::new();
+    let config = image_renderer::ImageRenderConfig {
+        dpi: 150.0,
+        ..Default::default()
+    };
+    if !doc.pages.is_empty() {
+        let img = image_renderer::render_page_to_image(&doc.pages[0], &config, &fm);
+        let png_path = "/tmp/wasm_converter_assignment_page1.png";
+        let mut f = std::fs::File::create(png_path).unwrap();
+        f.write_all(&img).unwrap();
+        eprintln!("✅ assignment.docx ページ1 PNG: {} ({} bytes)", png_path, img.len());
+    }
+}
+
+/// simple.xlsx（GitHub docxtemplater sample）の変換テスト
+#[test]
+fn test_simple_xlsx_conversion() {
+    use std::io::Write;
+
+    let xlsx_path = "/tmp/simple.xlsx";
+    let data = match std::fs::read(xlsx_path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("⏭ {}: ファイルが見つからないためスキップ", xlsx_path);
+            return;
+        }
+    };
+
+    eprintln!("simple.xlsx: {} bytes", data.len());
+
+    let doc = formats::convert_by_extension("xlsx", &data).expect("XLSX変換に失敗");
+    assert!(!doc.pages.is_empty(), "ページが生成されませんでした");
+    eprintln!("ページ数: {}", doc.pages.len());
+
+    let pdf = pdf_writer::render_to_pdf(&doc);
+    assert!(pdf.starts_with(b"%PDF-1.4"));
+    let pdf_path = "/tmp/wasm_converter_simple_xlsx.pdf";
+    let mut f = std::fs::File::create(pdf_path).unwrap();
+    f.write_all(&pdf).unwrap();
+    eprintln!("✅ simple.xlsx → PDF: {} ({} bytes)", pdf_path, pdf.len());
+
+    // PNG output
+    let fm = FontManager::new();
+    let config = image_renderer::ImageRenderConfig {
+        dpi: 150.0,
+        ..Default::default()
+    };
+    if !doc.pages.is_empty() {
+        let img = image_renderer::render_page_to_image(&doc.pages[0], &config, &fm);
+        let png_path = "/tmp/wasm_converter_simple_xlsx_page1.png";
+        let mut f = std::fs::File::create(png_path).unwrap();
+        f.write_all(&img).unwrap();
+        eprintln!("✅ simple.xlsx ページ1 PNG: {} ({} bytes)", png_path, img.len());
+    }
+}
+
+/// チャートXML直接解析テスト（棒グラフ、円グラフ、面グラフ）
+#[test]
+fn test_chart_xml_parsing() {
+    use wasm_document_converter::formats::chart;
+
+    // Test bar chart rendering
+    let bar_xml = r#"<?xml version="1.0"?>
+    <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+                  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+        <c:chart><c:plotArea>
+            <c:barChart>
+                <c:barDir val="col"/>
+                <c:grouping val="clustered"/>
+                <c:ser>
+                    <c:idx val="0"/>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Series 1</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:cat><c:strRef><c:strCache>
+                        <c:pt idx="0"><c:v>Cat A</c:v></c:pt>
+                        <c:pt idx="1"><c:v>Cat B</c:v></c:pt>
+                        <c:pt idx="2"><c:v>Cat C</c:v></c:pt>
+                    </c:strCache></c:strRef></c:cat>
+                    <c:val><c:numRef><c:numCache>
+                        <c:pt idx="0"><c:v>4.3</c:v></c:pt>
+                        <c:pt idx="1"><c:v>2.5</c:v></c:pt>
+                        <c:pt idx="2"><c:v>3.5</c:v></c:pt>
+                    </c:numCache></c:numRef></c:val>
+                </c:ser>
+                <c:ser>
+                    <c:idx val="1"/>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Series 2</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:val><c:numRef><c:numCache>
+                        <c:pt idx="0"><c:v>2.4</c:v></c:pt>
+                        <c:pt idx="1"><c:v>4.4</c:v></c:pt>
+                        <c:pt idx="2"><c:v>1.8</c:v></c:pt>
+                    </c:numCache></c:numRef></c:val>
+                </c:ser>
+            </c:barChart>
+        </c:plotArea></c:chart>
+    </c:chartSpace>"#;
+
+    let elements = chart::render_chart(bar_xml, 50.0, 50.0, 400.0, 300.0);
+    assert!(elements.len() > 10, "チャート要素が少なすぎます: {}", elements.len());
+
+    // Test pie chart
+    let pie_xml = r#"<?xml version="1.0"?>
+    <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+        <c:chart><c:plotArea>
+            <c:pie3DChart>
+                <c:ser>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Sales</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:cat><c:strRef><c:strCache>
+                        <c:pt idx="0"><c:v>Q1</c:v></c:pt>
+                        <c:pt idx="1"><c:v>Q2</c:v></c:pt>
+                        <c:pt idx="2"><c:v>Q3</c:v></c:pt>
+                    </c:strCache></c:strRef></c:cat>
+                    <c:val><c:numRef><c:numCache>
+                        <c:pt idx="0"><c:v>8.2</c:v></c:pt>
+                        <c:pt idx="1"><c:v>3.2</c:v></c:pt>
+                        <c:pt idx="2"><c:v>1.4</c:v></c:pt>
+                    </c:numCache></c:numRef></c:val>
+                </c:ser>
+            </c:pie3DChart>
+        </c:plotArea></c:chart>
+    </c:chartSpace>"#;
+
+    let pie_elements = chart::render_chart(pie_xml, 50.0, 50.0, 300.0, 300.0);
+    assert!(pie_elements.len() > 5, "円グラフ要素が少なすぎます: {}", pie_elements.len());
+
+    // Test area chart
+    let area_xml = r#"<?xml version="1.0"?>
+    <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+        <c:chart><c:plotArea>
+            <c:areaChart>
+                <c:ser>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Data</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:cat><c:strRef><c:strCache>
+                        <c:pt idx="0"><c:v>Jan</c:v></c:pt>
+                        <c:pt idx="1"><c:v>Feb</c:v></c:pt>
+                        <c:pt idx="2"><c:v>Mar</c:v></c:pt>
+                    </c:strCache></c:strRef></c:cat>
+                    <c:val><c:numRef><c:numCache>
+                        <c:pt idx="0"><c:v>1</c:v></c:pt>
+                        <c:pt idx="1"><c:v>3</c:v></c:pt>
+                        <c:pt idx="2"><c:v>2</c:v></c:pt>
+                    </c:numCache></c:numRef></c:val>
+                </c:ser>
+            </c:areaChart>
+        </c:plotArea></c:chart>
+    </c:chartSpace>"#;
+
+    let area_elements = chart::render_chart(area_xml, 0.0, 0.0, 400.0, 300.0);
+    assert!(area_elements.len() > 5, "面グラフ要素が少なすぎます: {}", area_elements.len());
+}

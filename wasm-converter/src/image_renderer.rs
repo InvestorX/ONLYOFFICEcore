@@ -540,57 +540,71 @@ fn decode_png_image(data: &[u8]) -> Option<DecodedImage> {
     Some(DecodedImage { width, height, pixels: rgba })
 }
 
-/// JPEG画像をデコード（簡易実装）
+/// JPEG画像をデコード（jpeg-decoderクレートによる完全実装）
 fn decode_jpeg_image(data: &[u8]) -> Option<DecodedImage> {
     // Check JPEG magic bytes
     if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
         return None;
     }
 
-    // Parse JPEG markers to get dimensions
-    let mut i = 2;
-    let mut width = 0u32;
-    let mut height = 0u32;
-    while i + 4 < data.len() {
-        if data[i] != 0xFF {
-            i += 1;
-            continue;
-        }
-        let marker = data[i + 1];
-        if marker == 0xD9 {
-            break; // EOI
-        }
-        if i + 3 >= data.len() {
-            break;
-        }
-        let length = ((data[i + 2] as usize) << 8) | (data[i + 3] as usize);
-
-        // SOF markers (Start of Frame)
-        if (0xC0..=0xC3).contains(&marker) || (0xC5..=0xC7).contains(&marker) {
-            if i + 8 < data.len() {
-                height = ((data[i + 5] as u32) << 8) | (data[i + 6] as u32);
-                width = ((data[i + 7] as u32) << 8) | (data[i + 8] as u32);
-            }
-            break;
-        }
-        i += 2 + length;
-    }
+    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(data));
+    let raw_pixels = decoder.decode().ok()?;
+    let info = decoder.info()?;
+    let width = info.width as u32;
+    let height = info.height as u32;
 
     if width == 0 || height == 0 {
         return None;
     }
 
-    // For JPEG, we produce a placeholder with estimated dimensions
-    // Full JPEG decode requires complex DCT/Huffman - placeholder with solid color
-    let mut pixels = vec![0u8; (width * height * 4) as usize];
-    // Fill with a mid-gray as placeholder (indicates image position)
-    for chunk in pixels.chunks_exact_mut(4) {
-        chunk[0] = 200;
-        chunk[1] = 200;
-        chunk[2] = 200;
-        chunk[3] = 255;
-    }
-    Some(DecodedImage { width, height, pixels })
+    // Convert to RGBA based on pixel format
+    let rgba = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => {
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for chunk in raw_pixels.chunks(3) {
+                if chunk.len() >= 3 {
+                    rgba.push(chunk[0]);
+                    rgba.push(chunk[1]);
+                    rgba.push(chunk[2]);
+                    rgba.push(255);
+                }
+            }
+            rgba
+        }
+        jpeg_decoder::PixelFormat::L8 => {
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for &g in &raw_pixels {
+                rgba.push(g);
+                rgba.push(g);
+                rgba.push(g);
+                rgba.push(255);
+            }
+            rgba
+        }
+        jpeg_decoder::PixelFormat::CMYK32 => {
+            let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+            for chunk in raw_pixels.chunks(4) {
+                if chunk.len() >= 4 {
+                    // CMYK → RGB conversion
+                    let c = chunk[0] as f64 / 255.0;
+                    let m = chunk[1] as f64 / 255.0;
+                    let y = chunk[2] as f64 / 255.0;
+                    let k = chunk[3] as f64 / 255.0;
+                    let r = (255.0 * (1.0 - c) * (1.0 - k)) as u8;
+                    let g = (255.0 * (1.0 - m) * (1.0 - k)) as u8;
+                    let b = (255.0 * (1.0 - y) * (1.0 - k)) as u8;
+                    rgba.push(r);
+                    rgba.push(g);
+                    rgba.push(b);
+                    rgba.push(255);
+                }
+            }
+            rgba
+        }
+        _ => return None,
+    };
+
+    Some(DecodedImage { width, height, pixels: rgba })
 }
 
 /// デコードされた画像をターゲットバッファにブリット（スケーリング付き）

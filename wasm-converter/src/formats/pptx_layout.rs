@@ -69,7 +69,24 @@ impl DocumentConverter for PptxConverter {
                 resolved_shapes.push(resolved);
             }
 
-            let page = render_slide_page(&resolved_shapes, &slide_size, bg.as_ref());
+            // チャート参照を検出して描画要素を収集
+            let chart_elements = detect_and_render_charts(
+                &slide_xml, &rels, &mut archive, &slide_size,
+            );
+
+            // SmartArt/ダイアグラム参照を検出して描画要素を収集
+            let smartart_elements = detect_and_render_smartart(
+                &slide_xml, &rels, &mut archive, &slide_size,
+            );
+
+            let mut page = render_slide_page(&resolved_shapes, &slide_size, bg.as_ref());
+
+            // チャート要素を追加
+            page.elements.extend(chart_elements);
+
+            // SmartArt要素を追加
+            page.elements.extend(smartart_elements);
+
             doc.pages.push(page);
         }
 
@@ -204,6 +221,8 @@ struct SlideShape {
     outline: Option<(Color, f64)>,
     rotation: f64,
     shadow: Option<ShadowEffect>,
+    has_3d: bool,
+    preset_geometry: Option<String>,
 }
 
 /// シャドウ効果
@@ -708,6 +727,10 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
     let mut grp_off_x: f64 = 0.0;
     let mut grp_off_y: f64 = 0.0;
 
+    // 3D effects and geometry
+    let mut cur_has_3d = false;
+    let mut cur_preset_geom: Option<String> = None;
+
     macro_rules! reset_shape_state {
         () => {
             cur_x = 0.0;
@@ -749,6 +772,8 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
             shdw_blur = 0.0;
             shdw_dist = 0.0;
             shdw_dir = 0.0;
+            cur_has_3d = false;
+            cur_preset_geom = None;
         };
     }
 
@@ -864,6 +889,20 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                                         / 180.0;
                                 }
                                 _ => {}
+                            }
+                        }
+                    }
+                    // 3D effects detection
+                    b"scene3d" | b"sp3d" if in_sp_pr || in_sp || in_pic => {
+                        cur_has_3d = true;
+                    }
+                    // Preset geometry
+                    b"prstGeom" if in_sp_pr => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"prst" {
+                                cur_preset_geom = Some(
+                                    String::from_utf8_lossy(&attr.value).to_string()
+                                );
                             }
                         }
                     }
@@ -1103,6 +1142,22 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                         }
                     }
                 }
+
+                // 3D effects (empty variants)
+                if (local == b"scene3d" || local == b"sp3d") && (in_sp_pr || in_sp || in_pic) {
+                    cur_has_3d = true;
+                }
+
+                // Preset geometry (empty variant)
+                if local == b"prstGeom" && in_sp_pr {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"prst" {
+                            cur_preset_geom = Some(
+                                String::from_utf8_lossy(&attr.value).to_string()
+                            );
+                        }
+                    }
+                }
             }
 
             Ok(quick_xml::events::Event::End(ref e)) => {
@@ -1147,6 +1202,8 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             outline: cur_outline,
                             rotation: cur_rotation,
                             shadow: cur_shadow.clone(),
+                            has_3d: cur_has_3d,
+                            preset_geometry: cur_preset_geom.clone(),
                         });
                         in_sp = false;
                     }
@@ -1168,6 +1225,8 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             outline: cur_outline,
                             rotation: cur_rotation,
                             shadow: cur_shadow.clone(),
+                            has_3d: cur_has_3d,
+                            preset_geometry: cur_preset_geom.clone(),
                         });
                         in_pic = false;
                     }
@@ -1182,6 +1241,8 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             outline: cur_outline.or(Some((Color::BLACK, 1.0))),
                             rotation: cur_rotation,
                             shadow: None,
+                            has_3d: false,
+                            preset_geometry: None,
                         });
                         in_cxn = false;
                     }
@@ -1399,6 +1460,355 @@ fn resolve_relationship(rels_xml: &str, r_id: &str) -> Option<String> {
     None
 }
 
+// ── Chart and SmartArt detection ──
+
+/// スライドXMLからチャート参照を検出し、チャートを描画
+fn detect_and_render_charts(
+    slide_xml: &str,
+    rels: &Option<String>,
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    slide_size: &SlideSize,
+) -> Vec<PageElement> {
+    let rels_xml = match rels {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+
+    let mut elements = Vec::new();
+
+    // チャートフレームの位置とrIdを検出
+    let chart_refs = find_chart_frames(slide_xml);
+
+    for (r_id, cx, cy, cw, ch) in chart_refs {
+        // リレーションシップからチャートXMLパスを解決
+        if let Some(target) = resolve_relationship(rels_xml, &r_id) {
+            let chart_path = if target.starts_with("../") {
+                format!("ppt/{}", target.trim_start_matches("../"))
+            } else if target.starts_with('/') {
+                target.trim_start_matches('/').to_string()
+            } else {
+                format!("ppt/slides/{}", target)
+            };
+
+            if let Ok(chart_xml) = read_zip_entry_string(archive, &chart_path) {
+                let chart_x = if cx > 0.0 { cx } else { slide_size.width * 0.1 };
+                let chart_y = if cy > 0.0 { cy } else { slide_size.height * 0.15 };
+                let chart_w = if cw > 0.0 { cw } else { slide_size.width * 0.8 };
+                let chart_h = if ch > 0.0 { ch } else { slide_size.height * 0.7 };
+
+                let chart_elems = crate::formats::chart::render_chart(
+                    &chart_xml,
+                    chart_x,
+                    chart_y,
+                    chart_w,
+                    chart_h,
+                );
+                elements.extend(chart_elems);
+            }
+        }
+    }
+
+    elements
+}
+
+/// スライドXMLからSmartArt/ダイアグラム参照を検出し、描画
+fn detect_and_render_smartart(
+    slide_xml: &str,
+    rels: &Option<String>,
+    archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
+    slide_size: &SlideSize,
+) -> Vec<PageElement> {
+    let rels_xml = match rels {
+        Some(r) => r,
+        None => return Vec::new(),
+    };
+
+    let mut elements = Vec::new();
+
+    // ダイアグラム描画のリレーションシップを検出
+    let dgm_refs = find_diagram_frames(slide_xml, rels_xml);
+
+    for (drawing_path, dx, dy, dw, dh) in dgm_refs {
+        let full_path = if drawing_path.starts_with("../") {
+            format!("ppt/{}", drawing_path.trim_start_matches("../"))
+        } else if drawing_path.starts_with('/') {
+            drawing_path.trim_start_matches('/').to_string()
+        } else {
+            drawing_path
+        };
+
+        if let Ok(drawing_xml) = read_zip_entry_string(archive, &full_path) {
+            let sa_x = if dx > 0.0 { dx } else { slide_size.width * 0.1 };
+            let sa_y = if dy > 0.0 { dy } else { slide_size.height * 0.15 };
+            let sa_w = if dw > 0.0 { dw } else { slide_size.width * 0.8 };
+            let sa_h = if dh > 0.0 { dh } else { slide_size.height * 0.7 };
+
+            let sa_elems = crate::formats::smartart::render_smartart(
+                &drawing_xml,
+                sa_x,
+                sa_y,
+                sa_w,
+                sa_h,
+            );
+            elements.extend(sa_elems);
+        }
+    }
+
+    elements
+}
+
+/// スライドXMLからチャートフレームの位置とrIdを検出
+/// Returns: Vec<(rId, x, y, width, height)>
+fn find_chart_frames(xml: &str) -> Vec<(String, f64, f64, f64, f64)> {
+    let mut results = Vec::new();
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut buf = Vec::new();
+
+    let mut in_graphic_frame = false;
+    let mut frame_x = 0.0f64;
+    let mut frame_y = 0.0f64;
+    let mut frame_w = 0.0f64;
+    let mut frame_h = 0.0f64;
+    let mut in_xfrm = false;
+    let mut chart_r_id: Option<String> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::Start(ref e)) => {
+                let local = e.local_name();
+                let name = local.as_ref();
+
+                match name {
+                    b"graphicFrame" => {
+                        in_graphic_frame = true;
+                        frame_x = 0.0;
+                        frame_y = 0.0;
+                        frame_w = 0.0;
+                        frame_h = 0.0;
+                        chart_r_id = None;
+                    }
+                    b"xfrm" if in_graphic_frame => { in_xfrm = true; }
+                    b"chart" if in_graphic_frame => {
+                        for attr in e.attributes().flatten() {
+                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            if key == "id" || key.ends_with(":id") {
+                                chart_r_id = Some(String::from_utf8_lossy(&attr.value).to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(ref e)) => {
+                let local = e.local_name();
+                let name = local.as_ref();
+
+                match name {
+                    b"off" if in_xfrm && in_graphic_frame => {
+                        for attr in e.attributes().flatten() {
+                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let val_str = std::str::from_utf8(&attr.value).unwrap_or("0");
+                            let val = val_str.parse::<f64>().unwrap_or(0.0) / EMU_PER_PT;
+                            match key {
+                                "x" => frame_x = val,
+                                "y" => frame_y = val,
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"ext" if in_xfrm && in_graphic_frame => {
+                        for attr in e.attributes().flatten() {
+                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let val_str = std::str::from_utf8(&attr.value).unwrap_or("0");
+                            let val = val_str.parse::<f64>().unwrap_or(0.0) / EMU_PER_PT;
+                            match key {
+                                "cx" => frame_w = val,
+                                "cy" => frame_h = val,
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"chart" if in_graphic_frame => {
+                        for attr in e.attributes().flatten() {
+                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            if key == "id" || key.ends_with(":id") {
+                                chart_r_id = Some(String::from_utf8_lossy(&attr.value).to_string());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::End(ref e)) => {
+                let local = e.local_name();
+                match local.as_ref() {
+                    b"graphicFrame" => {
+                        if let Some(r_id) = chart_r_id.take() {
+                            results.push((r_id, frame_x, frame_y, frame_w, frame_h));
+                        }
+                        in_graphic_frame = false;
+                    }
+                    b"xfrm" => { in_xfrm = false; }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    results
+}
+
+/// スライドXMLとリレーションシップからダイアグラム描画パスと位置を検出
+/// Returns: Vec<(drawing_path, x, y, width, height)>
+fn find_diagram_frames(xml: &str, rels_xml: &str) -> Vec<(String, f64, f64, f64, f64)> {
+    let mut results = Vec::new();
+
+    // ダイアグラム関連のリレーションシップを検出
+    let mut dgm_drawing_targets = Vec::new();
+    {
+        let mut reader = quick_xml::Reader::from_str(rels_xml);
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(quick_xml::events::Event::Empty(ref e))
+                | Ok(quick_xml::events::Event::Start(ref e)) => {
+                    if e.local_name().as_ref() == b"Relationship" {
+                        let mut rel_type = String::new();
+                        let mut target = String::new();
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"Type" => rel_type = String::from_utf8_lossy(&attr.value).to_string(),
+                                b"Target" => target = String::from_utf8_lossy(&attr.value).to_string(),
+                                _ => {}
+                            }
+                        }
+                        // dgm名前空間のdrawingタイプ
+                        if rel_type.contains("diagramDrawing") || rel_type.contains("dgmDrawing") {
+                            dgm_drawing_targets.push(target);
+                        }
+                    }
+                }
+                Ok(quick_xml::events::Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
+            }
+            buf.clear();
+        }
+    }
+
+    if dgm_drawing_targets.is_empty() {
+        return results;
+    }
+
+    // graphicFrame内のダイアグラムの位置を取得
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut in_graphic_frame = false;
+    let mut frame_x = 0.0f64;
+    let mut frame_y = 0.0f64;
+    let mut frame_w = 0.0f64;
+    let mut frame_h = 0.0f64;
+    let mut in_xfrm = false;
+    let mut has_dgm = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(quick_xml::events::Event::Start(ref e)) => {
+                let local = e.local_name();
+                let name = local.as_ref();
+                match name {
+                    b"graphicFrame" => {
+                        in_graphic_frame = true;
+                        frame_x = 0.0;
+                        frame_y = 0.0;
+                        frame_w = 0.0;
+                        frame_h = 0.0;
+                        has_dgm = false;
+                    }
+                    b"xfrm" if in_graphic_frame => { in_xfrm = true; }
+                    _ => {
+                        if in_graphic_frame {
+                            // Check for dgm namespace presence
+                            let qname = e.name();
+                            let name_bytes = qname.as_ref();
+                            let full_name = std::str::from_utf8(name_bytes).unwrap_or("");
+                            if full_name.contains("dgm") || full_name.contains("diagram") {
+                                has_dgm = true;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::Empty(ref e)) => {
+                let local = e.local_name();
+                let name = local.as_ref();
+                match name {
+                    b"off" if in_xfrm && in_graphic_frame => {
+                        for attr in e.attributes().flatten() {
+                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let val_str = std::str::from_utf8(&attr.value).unwrap_or("0");
+                            let val = val_str.parse::<f64>().unwrap_or(0.0) / EMU_PER_PT;
+                            match key {
+                                "x" => frame_x = val,
+                                "y" => frame_y = val,
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"ext" if in_xfrm && in_graphic_frame => {
+                        for attr in e.attributes().flatten() {
+                            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+                            let val_str = std::str::from_utf8(&attr.value).unwrap_or("0");
+                            let val = val_str.parse::<f64>().unwrap_or(0.0) / EMU_PER_PT;
+                            match key {
+                                "cx" => frame_w = val,
+                                "cy" => frame_h = val,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {
+                        if in_graphic_frame {
+                            let qname = e.name();
+                            let name_bytes = qname.as_ref();
+                            let full_name = std::str::from_utf8(name_bytes).unwrap_or("");
+                            if full_name.contains("dgm") || full_name.contains("diagram") {
+                                has_dgm = true;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(quick_xml::events::Event::End(ref e)) => {
+                let local = e.local_name();
+                match local.as_ref() {
+                    b"graphicFrame" => {
+                        if in_graphic_frame && has_dgm {
+                            // Use first available diagram drawing target
+                            if let Some(target) = dgm_drawing_targets.first() {
+                                results.push((target.clone(), frame_x, frame_y, frame_w, frame_h));
+                            }
+                        }
+                        in_graphic_frame = false;
+                    }
+                    b"xfrm" => { in_xfrm = false; }
+                    _ => {}
+                }
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    results
+}
+
 // ── Page rendering ──
 
 /// 解析済みシェイプからページを構築
@@ -1471,41 +1881,114 @@ fn render_slide_page(
 
         match &shape.content {
             ShapeContent::TextBox { paragraphs } => {
-                // Shape fill
-                match &shape.fill {
-                    Some(ShapeFill::Solid(color)) => {
-                        page.elements.push(PageElement::Rect {
-                            x: shape.x,
-                            y: shape.y,
-                            width: shape.width,
-                            height: shape.height,
-                            fill: Some(*color),
-                            stroke: None,
-                            stroke_width: 0.0,
-                        });
-                    }
-                    Some(ShapeFill::Gradient { stops, angle }) => {
-                        page.elements.push(PageElement::GradientRect {
-                            x: shape.x,
-                            y: shape.y,
-                            width: shape.width,
-                            height: shape.height,
-                            stops: stops.clone(),
-                            gradient_type: GradientType::Linear(*angle),
-                        });
-                    }
-                    Some(ShapeFill::Image { data, mime_type }) => {
-                        page.elements.push(PageElement::Image {
-                            x: shape.x,
-                            y: shape.y,
-                            width: shape.width,
-                            height: shape.height,
-                            data: data.clone(),
-                            mime_type: mime_type.clone(),
-                        });
-                    }
-                    None => {}
+                // Check for ellipse/rounded geometry
+                let is_ellipse = shape.preset_geometry.as_deref() == Some("ellipse");
+                let is_rounded = matches!(
+                    shape.preset_geometry.as_deref(),
+                    Some("roundRect") | Some("flowChartAlternateProcess")
+                );
+
+                // 3D effect: draw depth extrusion behind the shape
+                if shape.has_3d && shape.width > 0.0 && shape.height > 0.0 {
+                    let depth = 6.0; // 3D extrusion depth in points
+                    let base_color = match &shape.fill {
+                        Some(ShapeFill::Solid(c)) => *c,
+                        _ => Color::rgb(150, 150, 150),
+                    };
+                    // Darker version for 3D sides
+                    let dark_color = Color::rgb(
+                        (base_color.r as f64 * 0.6) as u8,
+                        (base_color.g as f64 * 0.6) as u8,
+                        (base_color.b as f64 * 0.6) as u8,
+                    );
+                    // Bottom depth strip
+                    page.elements.push(PageElement::Rect {
+                        x: shape.x + 2.0,
+                        y: shape.y + shape.height,
+                        width: shape.width,
+                        height: depth,
+                        fill: Some(dark_color),
+                        stroke: None,
+                        stroke_width: 0.0,
+                    });
+                    // Right depth strip
+                    page.elements.push(PageElement::Rect {
+                        x: shape.x + shape.width,
+                        y: shape.y + 2.0,
+                        width: depth,
+                        height: shape.height,
+                        fill: Some(dark_color),
+                        stroke: None,
+                        stroke_width: 0.0,
+                    });
                 }
+
+                // Shape fill - use preset geometry for rendering
+                if is_ellipse {
+                    let fill_color = match &shape.fill {
+                        Some(ShapeFill::Solid(c)) => Some(*c),
+                        _ => None,
+                    };
+                    let stroke_info = shape.outline;
+                    page.elements.push(PageElement::Ellipse {
+                        cx: shape.x + shape.width / 2.0,
+                        cy: shape.y + shape.height / 2.0,
+                        rx: shape.width / 2.0,
+                        ry: shape.height / 2.0,
+                        fill: fill_color,
+                        stroke: stroke_info.map(|(c, _)| c),
+                        stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
+                    });
+                } else {
+                    // Standard rectangle or rounded rect rendering
+                    match &shape.fill {
+                        Some(ShapeFill::Solid(color)) => {
+                            if is_rounded {
+                                // Approximate rounded rect: slightly inset ellipse corners
+                                page.elements.push(PageElement::Rect {
+                                    x: shape.x,
+                                    y: shape.y,
+                                    width: shape.width,
+                                    height: shape.height,
+                                    fill: Some(*color),
+                                    stroke: None,
+                                    stroke_width: 0.0,
+                                });
+                            } else {
+                                page.elements.push(PageElement::Rect {
+                                    x: shape.x,
+                                    y: shape.y,
+                                    width: shape.width,
+                                    height: shape.height,
+                                    fill: Some(*color),
+                                    stroke: None,
+                                    stroke_width: 0.0,
+                                });
+                            }
+                        }
+                        Some(ShapeFill::Gradient { stops, angle }) => {
+                            page.elements.push(PageElement::GradientRect {
+                                x: shape.x,
+                                y: shape.y,
+                                width: shape.width,
+                                height: shape.height,
+                                stops: stops.clone(),
+                                gradient_type: GradientType::Linear(*angle),
+                            });
+                        }
+                        Some(ShapeFill::Image { data, mime_type }) => {
+                            page.elements.push(PageElement::Image {
+                                x: shape.x,
+                                y: shape.y,
+                                width: shape.width,
+                                height: shape.height,
+                                data: data.clone(),
+                                mime_type: mime_type.clone(),
+                            });
+                        }
+                        None => {}
+                    }
+                } // end else (non-ellipse)
 
                 // Shape outline
                 if let Some((color, width)) = shape.outline {

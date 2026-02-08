@@ -10,6 +10,8 @@ pub mod docx_layout;
 pub mod xlsx;
 pub mod pptx;
 pub mod pptx_layout;
+pub mod chart;
+pub mod smartart;
 pub mod common_stubs;
 
 use crate::converter::{ConvertError, Document, DocumentConverter};
