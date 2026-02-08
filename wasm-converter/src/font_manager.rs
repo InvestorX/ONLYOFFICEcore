@@ -110,6 +110,12 @@ impl FontManager {
         self.builtin_japanese_font()
     }
 
+    /// 外部フォントのイテレータを返す
+    /// PDF生成時にab_glyphでパース可能なフォントを検索するために使用
+    pub fn external_fonts_iter(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.external_fonts.iter().map(|(name, data)| (name.as_str(), data.as_slice()))
+    }
+
     /// 名前でフォントデータを取得
     pub fn get_font_data(&self, name: &str) -> Option<&[u8]> {
         // まず外部フォントを検索（完全一致）

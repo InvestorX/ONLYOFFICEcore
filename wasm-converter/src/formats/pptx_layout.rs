@@ -2216,6 +2216,7 @@ fn detect_and_render_tables(
     let mut cell_fill: Option<Color> = None;
     let mut in_tc_pr = false;
     let mut in_solid_fill = false;
+    let mut tc_para_count = 0u32; // 現在のセル内の段落数
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -2258,12 +2259,24 @@ fn detect_and_render_tables(
                         in_tc = true;
                         current_cell_text.clear();
                         cell_fill = None;
+                        tc_para_count = 0;
                     }
                     b"tcPr" if in_tc => {
                         in_tc_pr = true;
                     }
                     b"solidFill" if in_tc_pr => {
                         in_solid_fill = true;
+                    }
+                    b"p" if in_tc => {
+                        // 2番目以降の段落では改行を挿入
+                        if tc_para_count > 0 && !current_cell_text.is_empty() {
+                            current_cell_text.push('\n');
+                        }
+                        tc_para_count += 1;
+                    }
+                    b"br" if in_tc => {
+                        // テーブルセル内の改行（Start要素）
+                        current_cell_text.push('\n');
                     }
                     b"t" if in_tc => {
                         in_tc_text = true;
@@ -2303,6 +2316,10 @@ fn detect_and_render_tables(
                                 col_widths.push(w);
                             }
                         }
+                    }
+                    b"br" if in_tc => {
+                        // テーブルセル内の改行（Empty要素）
+                        current_cell_text.push('\n');
                     }
                     _ => {
                         // Color elements in solidFill within tcPr
