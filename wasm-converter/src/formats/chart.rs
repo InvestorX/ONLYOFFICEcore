@@ -440,6 +440,11 @@ fn render_bar_chart(
     }
 }
 
+/// 3D円グラフの垂直圧縮率
+const PIE_3D_VERTICAL_RATIO: f64 = 0.6;
+/// 3D円グラフの奥行き（ポイント）
+const PIE_3D_DEPTH: f64 = 12.0;
+
 /// 円グラフの描画
 fn render_pie_chart(
     elements: &mut Vec<PageElement>,
@@ -464,11 +469,11 @@ fn render_pie_chart(
     let cx = x + w / 2.0;
     let cy = y + h / 2.0;
     let rx = (w.min(h) / 2.0) * 0.85;
-    let ry = if is_3d { rx * 0.6 } else { rx }; // 3D effect: compress vertically
+    let ry = if is_3d { rx * PIE_3D_VERTICAL_RATIO } else { rx }; // 3D effect: compress vertically
 
     // For 3D pie, draw the "side" first
     if is_3d {
-        let depth = 12.0;
+        let depth = PIE_3D_DEPTH;
         // Draw side of pie (simplified: full ellipse side)
         for d in (0..depth as u32).rev() {
             let side_cy = cy + d as f64;

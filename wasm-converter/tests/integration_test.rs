@@ -731,7 +731,7 @@ fn test_sample12_chart_rendering() {
     };
 
     let doc = formats::convert_by_extension("pptx", &data).expect("PPTX変換に失敗");
-    assert!(doc.pages.len() >= 10, "12スライドあるはず");
+    assert!(doc.pages.len() >= 12, "12スライドあるはず（実際: {}）", doc.pages.len());
 
     // Slide 8 has a bar chart
     let slide8 = &doc.pages[7];

@@ -13,6 +13,9 @@ use crate::converter::{
 /// 1インチ = 914400 EMU = 72 pt
 const EMU_PER_PT: f64 = 914400.0 / 72.0;
 
+/// 3D効果の押し出し深度（ポイント単位）
+const SHAPE_3D_EXTRUSION_DEPTH: f64 = 6.0;
+
 /// PPTXコンバーター
 pub struct PptxConverter;
 
@@ -1890,7 +1893,7 @@ fn render_slide_page(
 
                 // 3D effect: draw depth extrusion behind the shape
                 if shape.has_3d && shape.width > 0.0 && shape.height > 0.0 {
-                    let depth = 6.0; // 3D extrusion depth in points
+                    let depth = SHAPE_3D_EXTRUSION_DEPTH;
                     let base_color = match &shape.fill {
                         Some(ShapeFill::Solid(c)) => *c,
                         _ => Color::rgb(150, 150, 150),

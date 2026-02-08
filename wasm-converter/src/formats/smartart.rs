@@ -17,6 +17,13 @@ struct SmartArtShape {
     is_rounded: bool,
 }
 
+/// SmartArtテキストフォントサイズのシェイプ高さに対する比率
+const FONT_SIZE_RATIO: f64 = 0.25;
+/// SmartArtテキストフォントサイズ上限
+const MAX_FONT_SIZE: f64 = 12.0;
+/// SmartArtテキストフォントサイズ下限
+const MIN_FONT_SIZE: f64 = 6.0;
+
 /// SmartArt XMLを解析してPageElementのリストを生成
 pub fn render_smartart(
     drawing_xml: &str,
@@ -82,7 +89,7 @@ pub fn render_smartart(
 
         // Text
         if !shape.text.is_empty() {
-            let font_size = (sh * 0.25).min(12.0).max(6.0);
+            let font_size = (sh * FONT_SIZE_RATIO).min(MAX_FONT_SIZE).max(MIN_FONT_SIZE);
             elements.push(PageElement::Text {
                 x: sx + 4.0,
                 y: sy + sh / 2.0 - font_size / 2.0,
