@@ -2877,15 +2877,578 @@ fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Option<Ve
             cmds.push(PathCommand::Close);
             Some(cmds)
         }
-        "moon" | "smileyFace" | "sun" | "noSmoking" | "foldedCorner"
-        | "frame" | "bevel" | "gear6" | "gear9"
-        | "flowChartProcess" | "flowChartDecision" | "flowChartTerminator"
-        | "flowChartDocument" | "flowChartPredefinedProcess" | "flowChartInputOutput"
-        | "flowChartPreparation" | "flowChartManualInput" | "flowChartManualOperation"
-        | "flowChartConnector" | "flowChartOffpageConnector" | "flowChartSort"
-        | "flowChartExtract" | "flowChartMerge" | "flowChartDelay"
-        | "flowChartDisplay" | "flowChartMultidocument" | "flowChartOnlineStorage"
-        | "actionButtonBlank" | "actionButtonHome" | "actionButtonHelp" => {
+        // Flowchart: Process (simple rectangle)
+        "flowChartProcess" => {
+            Some(vec![
+                PathCommand::MoveTo(x, y),
+                PathCommand::LineTo(x + w, y),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+            ])
+        }
+        // Flowchart: Decision (diamond)
+        "flowChartDecision" => {
+            Some(vec![
+                PathCommand::MoveTo(x + w / 2.0, y),
+                PathCommand::LineTo(x + w, y + h / 2.0),
+                PathCommand::LineTo(x + w / 2.0, y + h),
+                PathCommand::LineTo(x, y + h / 2.0),
+                PathCommand::Close,
+            ])
+        }
+        // Flowchart: Terminator (stadium/rounded rectangle)
+        "flowChartTerminator" => {
+            let r = h / 2.0;
+            Some(vec![
+                PathCommand::MoveTo(x + r, y),
+                PathCommand::LineTo(x + w - r, y),
+                PathCommand::ArcTo(r, r, 0.0, false, true, x + w - r, y + h),
+                PathCommand::LineTo(x + r, y + h),
+                PathCommand::ArcTo(r, r, 0.0, false, true, x + r, y),
+                PathCommand::Close,
+            ])
+        }
+        // Flowchart: Document (rectangle with wavy bottom)
+        "flowChartDocument" => {
+            let wave_h = h * 0.08;
+            let steps = 16;
+            let mut cmds = vec![PathCommand::MoveTo(x, y)];
+            cmds.push(PathCommand::LineTo(x + w, y));
+            cmds.push(PathCommand::LineTo(x + w, y + h - wave_h));
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let px = x + w - t * w;
+                let py = y + h - wave_h + wave_h * (2.0 * PI * t * 3.0).sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::LineTo(x, y));
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Flowchart: Predefined Process (rectangle with double vertical lines)
+        "flowChartPredefinedProcess" => {
+            let margin = w * 0.1;
+            Some(vec![
+                PathCommand::MoveTo(x, y),
+                PathCommand::LineTo(x + w, y),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+                // Left vertical line
+                PathCommand::MoveTo(x + margin, y),
+                PathCommand::LineTo(x + margin, y + h),
+                // Right vertical line
+                PathCommand::MoveTo(x + w - margin, y),
+                PathCommand::LineTo(x + w - margin, y + h),
+            ])
+        }
+        // Flowchart: Input/Output (parallelogram)
+        "flowChartInputOutput" => {
+            let offset = w * 0.2;
+            Some(vec![
+                PathCommand::MoveTo(x + offset, y),
+                PathCommand::LineTo(x + w, y),
+                PathCommand::LineTo(x + w - offset, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+            ])
+        }
+        // Flowchart: Preparation (hexagon)
+        "flowChartPreparation" => {
+            let offset = w * 0.2;
+            Some(vec![
+                PathCommand::MoveTo(x + offset, y),
+                PathCommand::LineTo(x + w - offset, y),
+                PathCommand::LineTo(x + w, y + h / 2.0),
+                PathCommand::LineTo(x + w - offset, y + h),
+                PathCommand::LineTo(x + offset, y + h),
+                PathCommand::LineTo(x, y + h / 2.0),
+                PathCommand::Close,
+            ])
+        }
+        // Flowchart: Manual Input (trapezoid with slanted top)
+        "flowChartManualInput" => {
+            let offset = h * 0.15;
+            Some(vec![
+                PathCommand::MoveTo(x, y + offset),
+                PathCommand::LineTo(x + w, y),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+            ])
+        }
+        // Flowchart: Manual Operation (trapezoid with slanted sides)
+        "flowChartManualOperation" => {
+            let offset = w * 0.15;
+            Some(vec![
+                PathCommand::MoveTo(x + offset, y),
+                PathCommand::LineTo(x + w - offset, y),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+            ])
+        }
+        // Flowchart: Connector (circle)
+        "flowChartConnector" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let r = w.min(h) / 2.0;
+            let steps = 48;
+            let mut cmds = Vec::new();
+            for i in 0..=steps {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + r * angle.cos();
+                let py = cy + r * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Flowchart: Off-page Connector (home plate pentagon)
+        "flowChartOffpageConnector" => {
+            Some(vec![
+                PathCommand::MoveTo(x, y),
+                PathCommand::LineTo(x + w, y),
+                PathCommand::LineTo(x + w, y + h * 0.75),
+                PathCommand::LineTo(x + w / 2.0, y + h),
+                PathCommand::LineTo(x, y + h * 0.75),
+                PathCommand::Close,
+            ])
+        }
+        // Flowchart: Sort (diamond with crossing lines)
+        "flowChartSort" => {
+            Some(vec![
+                // Outer diamond
+                PathCommand::MoveTo(x + w / 2.0, y),
+                PathCommand::LineTo(x + w, y + h / 2.0),
+                PathCommand::LineTo(x + w / 2.0, y + h),
+                PathCommand::LineTo(x, y + h / 2.0),
+                PathCommand::Close,
+                // Horizontal line
+                PathCommand::MoveTo(x, y + h / 2.0),
+                PathCommand::LineTo(x + w, y + h / 2.0),
+            ])
+        }
+        // Flowchart: Extract (triangle pointing down)
+        "flowChartExtract" => {
+            Some(vec![
+                PathCommand::MoveTo(x, y),
+                PathCommand::LineTo(x + w, y),
+                PathCommand::LineTo(x + w / 2.0, y + h),
+                PathCommand::Close,
+            ])
+        }
+        // Flowchart: Merge (triangle pointing up)
+        "flowChartMerge" => {
+            Some(vec![
+                PathCommand::MoveTo(x, y + h),
+                PathCommand::LineTo(x + w / 2.0, y),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::Close,
+            ])
+        }
+        // Flowchart: Delay (semi-circle on right side)
+        "flowChartDelay" => {
+            let steps = 24;
+            let mut cmds = vec![PathCommand::MoveTo(x, y)];
+            for i in 0..=steps {
+                let angle = -PI / 2.0 + PI * i as f64 / steps as f64;
+                let px = x + w + (w * 0.2) * angle.cos();
+                let py = y + h / 2.0 + (h / 2.0) * angle.sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::LineTo(x, y + h));
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Flowchart: Display (curved sides)
+        "flowChartDisplay" => {
+            let steps = 16;
+            let mut cmds = vec![PathCommand::MoveTo(x, y + h / 2.0)];
+            // Top left curve
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let px = x + w * 0.15 * t;
+                let py = y + (h / 2.0) * (1.0 - t);
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::LineTo(x + w * 0.85, y));
+            // Top right curve
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let px = x + w * 0.85 + w * 0.15 * t;
+                let py = y + (h / 2.0) * t;
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            // Bottom right curve
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let px = x + w - w * 0.15 * t;
+                let py = y + h / 2.0 + (h / 2.0) * t;
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::LineTo(x + w * 0.15, y + h));
+            // Bottom left curve
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let px = x + w * 0.15 - w * 0.15 * t;
+                let py = y + h - (h / 2.0) * t;
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Flowchart: Multidocument (stacked documents with wavy bottoms)
+        "flowChartMultidocument" => {
+            let wave_h = h * 0.06;
+            let offset = w * 0.08;
+            let steps = 12;
+            let mut cmds = Vec::new();
+            // Back document
+            cmds.push(PathCommand::MoveTo(x + offset * 2.0, y));
+            cmds.push(PathCommand::LineTo(x + w, y));
+            cmds.push(PathCommand::LineTo(x + w, y + h * 0.3 - wave_h));
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let px = x + w - t * (w - offset * 2.0);
+                let py = y + h * 0.3 - wave_h + wave_h * (2.0 * PI * t * 2.0).sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            // Middle document
+            cmds.push(PathCommand::MoveTo(x + offset, y + h * 0.15));
+            cmds.push(PathCommand::LineTo(x + w - offset, y + h * 0.15));
+            cmds.push(PathCommand::LineTo(x + w - offset, y + h * 0.5 - wave_h));
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let px = x + w - offset - t * (w - offset * 2.0);
+                let py = y + h * 0.5 - wave_h + wave_h * (2.0 * PI * t * 2.0).sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            // Front document
+            cmds.push(PathCommand::MoveTo(x, y + h * 0.3));
+            cmds.push(PathCommand::LineTo(x + w - offset * 2.0, y + h * 0.3));
+            cmds.push(PathCommand::LineTo(x + w - offset * 2.0, y + h - wave_h));
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let px = x + w - offset * 2.0 - t * (w - offset * 2.0);
+                let py = y + h - wave_h + wave_h * (2.0 * PI * t * 2.0).sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Flowchart: Online Storage (curved bottom triangle)
+        "flowChartOnlineStorage" => {
+            let steps = 20;
+            let mut cmds = vec![PathCommand::MoveTo(x, y)];
+            cmds.push(PathCommand::LineTo(x + w, y));
+            cmds.push(PathCommand::LineTo(x + w, y + h * 0.7));
+            // Curved bottom
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let px = x + w - t * w;
+                let py = y + h * 0.7 + h * 0.3 * (PI * t).sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::LineTo(x, y));
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Special Shapes: Moon (crescent)
+        "moon" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let steps = 48;
+            let mut cmds = Vec::new();
+            // Outer circle
+            for i in 0..=steps {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + rx * angle.cos();
+                let py = cy + ry * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            // Inner crescent cutout (reverse direction for hole)
+            let offset_x = w * 0.2;
+            for i in (0..=steps).rev() {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + offset_x + rx * 0.6 * angle.cos();
+                let py = cy + ry * 0.6 * angle.sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Special Shapes: Smiley Face
+        "smileyFace" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let r = w.min(h) / 2.0;
+            let steps = 48;
+            let mut cmds = Vec::new();
+            // Face circle
+            for i in 0..=steps {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + r * angle.cos();
+                let py = cy + r * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            // Left eye
+            let eye_r = r * 0.08;
+            let eye_y = cy - r * 0.25;
+            for i in 0..=steps / 4 {
+                let angle = 2.0 * PI * i as f64 / (steps / 4) as f64;
+                let px = cx - r * 0.3 + eye_r * angle.cos();
+                let py = eye_y + eye_r * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            // Right eye
+            for i in 0..=steps / 4 {
+                let angle = 2.0 * PI * i as f64 / (steps / 4) as f64;
+                let px = cx + r * 0.3 + eye_r * angle.cos();
+                let py = eye_y + eye_r * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            // Smile
+            cmds.push(PathCommand::MoveTo(cx - r * 0.4, cy + r * 0.1));
+            for i in 0..=steps / 4 {
+                let t = i as f64 / (steps / 4) as f64;
+                let angle = PI * 0.2 + PI * 0.6 * t;
+                let px = cx + r * 0.4 * angle.cos();
+                let py = cy + r * 0.4 * angle.sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            Some(cmds)
+        }
+        // Special Shapes: Sun (circle with rays)
+        "sun" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let r_inner = w.min(h) * 0.35;
+            let r_outer = w.min(h) * 0.5;
+            let rays = 16;
+            let steps_per_ray = 3;
+            let mut cmds = Vec::new();
+            for i in 0..(rays * steps_per_ray) {
+                let angle = 2.0 * PI * i as f64 / (rays * steps_per_ray) as f64;
+                let r = if i % steps_per_ray == 1 { r_outer } else { r_inner };
+                let px = cx + r * angle.cos();
+                let py = cy + r * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Special Shapes: No Smoking (circle with diagonal line)
+        "noSmoking" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let r_outer = w.min(h) / 2.0;
+            let r_inner = r_outer * 0.85;
+            let line_w = r_outer * 0.15;
+            let steps = 48;
+            let mut cmds = Vec::new();
+            // Outer circle
+            for i in 0..=steps {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + r_outer * angle.cos();
+                let py = cy + r_outer * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            // Inner circle (reverse)
+            for i in (0..=steps).rev() {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + r_inner * angle.cos();
+                let py = cy + r_inner * angle.sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            // Diagonal line (top-left to bottom-right)
+            let offset = r_outer * 0.707;
+            cmds.push(PathCommand::MoveTo(cx - offset, cy - offset - line_w));
+            cmds.push(PathCommand::LineTo(cx - offset + line_w, cy - offset));
+            cmds.push(PathCommand::LineTo(cx + offset, cy + offset + line_w));
+            cmds.push(PathCommand::LineTo(cx + offset - line_w, cy + offset));
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Special Shapes: Folded Corner
+        "foldedCorner" => {
+            let fold = w.min(h) * 0.15;
+            Some(vec![
+                PathCommand::MoveTo(x, y),
+                PathCommand::LineTo(x + w - fold, y),
+                PathCommand::LineTo(x + w, y + fold),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+                // Fold triangle
+                PathCommand::MoveTo(x + w - fold, y),
+                PathCommand::LineTo(x + w - fold, y + fold),
+                PathCommand::LineTo(x + w, y + fold),
+                PathCommand::Close,
+            ])
+        }
+        // Special Shapes: Frame (hollow rectangle)
+        "frame" => {
+            let thickness = w.min(h) * 0.15;
+            Some(vec![
+                // Outer rectangle
+                PathCommand::MoveTo(x, y),
+                PathCommand::LineTo(x + w, y),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+                // Inner rectangle (reverse direction for hole)
+                PathCommand::MoveTo(x + thickness, y + thickness),
+                PathCommand::LineTo(x + thickness, y + h - thickness),
+                PathCommand::LineTo(x + w - thickness, y + h - thickness),
+                PathCommand::LineTo(x + w - thickness, y + thickness),
+                PathCommand::Close,
+            ])
+        }
+        // Special Shapes: Bevel (3D beveled rectangle)
+        "bevel" => {
+            let bevel = w.min(h) * 0.12;
+            Some(vec![
+                // Outer shape
+                PathCommand::MoveTo(x + bevel, y),
+                PathCommand::LineTo(x + w - bevel, y),
+                PathCommand::LineTo(x + w, y + bevel),
+                PathCommand::LineTo(x + w, y + h - bevel),
+                PathCommand::LineTo(x + w - bevel, y + h),
+                PathCommand::LineTo(x + bevel, y + h),
+                PathCommand::LineTo(x, y + h - bevel),
+                PathCommand::LineTo(x, y + bevel),
+                PathCommand::Close,
+                // Inner bevel lines
+                PathCommand::MoveTo(x + bevel, y),
+                PathCommand::LineTo(x + bevel, y + bevel),
+                PathCommand::LineTo(x + bevel, y + h - bevel),
+                PathCommand::MoveTo(x + w - bevel, y),
+                PathCommand::LineTo(x + w - bevel, y + bevel),
+                PathCommand::LineTo(x + w - bevel, y + h - bevel),
+                PathCommand::MoveTo(x + bevel, y + bevel),
+                PathCommand::LineTo(x + w - bevel, y + bevel),
+                PathCommand::MoveTo(x + bevel, y + h - bevel),
+                PathCommand::LineTo(x + w - bevel, y + h - bevel),
+            ])
+        }
+        // Special Shapes: Gear 6
+        "gear6" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let r_outer = w.min(h) / 2.0;
+            let r_inner = r_outer * 0.7;
+            let r_tooth = r_outer * 0.85;
+            let teeth = 6;
+            let steps_per_tooth = 4;
+            let mut cmds = Vec::new();
+            for i in 0..(teeth * steps_per_tooth) {
+                let angle = 2.0 * PI * i as f64 / (teeth * steps_per_tooth) as f64;
+                let tooth_phase = i % steps_per_tooth;
+                let r = match tooth_phase {
+                    0 | 3 => r_tooth,
+                    1 | 2 => r_outer,
+                    _ => r_inner,
+                };
+                let px = cx + r * angle.cos();
+                let py = cy + r * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            // Center hole
+            let r_hole = r_inner * 0.5;
+            let steps = 24;
+            for i in (0..=steps).rev() {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + r_hole * angle.cos();
+                let py = cy + r_hole * angle.sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Special Shapes: Gear 9
+        "gear9" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let r_outer = w.min(h) / 2.0;
+            let r_inner = r_outer * 0.7;
+            let r_tooth = r_outer * 0.85;
+            let teeth = 9;
+            let steps_per_tooth = 4;
+            let mut cmds = Vec::new();
+            for i in 0..(teeth * steps_per_tooth) {
+                let angle = 2.0 * PI * i as f64 / (teeth * steps_per_tooth) as f64;
+                let tooth_phase = i % steps_per_tooth;
+                let r = match tooth_phase {
+                    0 | 3 => r_tooth,
+                    1 | 2 => r_outer,
+                    _ => r_inner,
+                };
+                let px = cx + r * angle.cos();
+                let py = cy + r * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            // Center hole
+            let r_hole = r_inner * 0.5;
+            let steps = 24;
+            for i in (0..=steps).rev() {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + r_hole * angle.cos();
+                let py = cy + r_hole * angle.sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        // Action Buttons: Blank (rounded rectangle)
+        "actionButtonBlank" | "actionButtonHome" | "actionButtonHelp" => {
             let r = (w.min(h) * 0.08).min(6.0);
             Some(vec![
                 PathCommand::MoveTo(x + r, y),
