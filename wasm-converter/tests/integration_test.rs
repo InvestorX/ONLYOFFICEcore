@@ -653,6 +653,8 @@ fn test_real_sample12_pptx_layout() {
                 PageElement::Ellipse { .. } => "Ellipse",
                 PageElement::TableBlock { .. } => "Table",
                 PageElement::Path { .. } => "Path",
+                PageElement::EllipseImage { .. } => "EllipseImage",
+                PageElement::PathImage { .. } => "PathImage",
             };
             *counts.entry(key).or_insert(0u32) += 1;
         }

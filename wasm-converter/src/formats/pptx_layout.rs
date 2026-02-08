@@ -230,6 +230,11 @@ struct SlideShape {
     custom_path_viewport: Option<(f64, f64)>,
     /// blipFill r:embed on the shape (resolved later)
     fill_image_r_id: Option<String>,
+    /// Text body margins in points (from bodyPr lIns, tIns, rIns, bIns)
+    text_margin_left: f64,
+    text_margin_top: f64,
+    text_margin_right: f64,
+    text_margin_bottom: f64,
 }
 
 /// シャドウ効果
@@ -781,6 +786,12 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
     let mut style_fill_color: Option<Color> = None;
     let mut style_ln_color: Option<Color> = None;
 
+    // Text body margins (from bodyPr)
+    let mut text_margin_left: f64 = 4.0;   // default 4pt
+    let mut text_margin_top: f64 = 4.0;
+    let mut text_margin_right: f64 = 4.0;
+    let mut text_margin_bottom: f64 = 4.0;
+
     macro_rules! reset_shape_state {
         () => {
             cur_x = 0.0;
@@ -837,6 +848,10 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
             in_ln_ref = false;
             style_fill_color = None;
             style_ln_color = None;
+            text_margin_left = 4.0;
+            text_margin_top = 4.0;
+            text_margin_right = 4.0;
+            text_margin_bottom = 4.0;
         };
     }
 
@@ -1255,6 +1270,39 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                     }
                 }
 
+                // Text body properties - parse margins
+                if local == b"bodyPr" && (in_sp || in_pic) && !in_sp_pr {
+                    for attr in e.attributes().flatten() {
+                        match attr.key.as_ref() {
+                            b"lIns" => {
+                                text_margin_left = String::from_utf8_lossy(&attr.value)
+                                    .parse::<f64>()
+                                    .unwrap_or(91440.0)
+                                    / EMU_PER_PT;
+                            }
+                            b"tIns" => {
+                                text_margin_top = String::from_utf8_lossy(&attr.value)
+                                    .parse::<f64>()
+                                    .unwrap_or(45720.0)
+                                    / EMU_PER_PT;
+                            }
+                            b"rIns" => {
+                                text_margin_right = String::from_utf8_lossy(&attr.value)
+                                    .parse::<f64>()
+                                    .unwrap_or(91440.0)
+                                    / EMU_PER_PT;
+                            }
+                            b"bIns" => {
+                                text_margin_bottom = String::from_utf8_lossy(&attr.value)
+                                    .parse::<f64>()
+                                    .unwrap_or(45720.0)
+                                    / EMU_PER_PT;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
                 // Bullet markers
                 if (local == b"buChar" || local == b"buAutoNum") && (in_sp || in_pic) {
                     if local == b"buChar" {
@@ -1405,6 +1453,10 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             custom_path: if cust_path_cmds.is_empty() { None } else { Some(cust_path_cmds.clone()) },
                             custom_path_viewport: if cust_path_cmds.is_empty() { None } else { Some((cust_path_w, cust_path_h)) },
                             fill_image_r_id: if cur_fill_blip_r_id.is_empty() { None } else { Some(cur_fill_blip_r_id.clone()) },
+                            text_margin_left,
+                            text_margin_top,
+                            text_margin_right,
+                            text_margin_bottom,
                         });
                         in_sp = false;
                     }
@@ -1431,6 +1483,10 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             custom_path: None,
                             custom_path_viewport: None,
                             fill_image_r_id: None,
+                            text_margin_left,
+                            text_margin_top,
+                            text_margin_right,
+                            text_margin_bottom,
                         });
                         in_pic = false;
                     }
@@ -1450,6 +1506,10 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             custom_path: None,
                             custom_path_viewport: None,
                             fill_image_r_id: None,
+                            text_margin_left: 4.0,
+                            text_margin_top: 4.0,
+                            text_margin_right: 4.0,
+                            text_margin_bottom: 4.0,
                         });
                         in_cxn = false;
                     }
@@ -2363,44 +2423,51 @@ fn render_slide_page(
                 }
 
                 // Render text paragraphs positioned within the shape
-                let margin = 4.0;
-                let mut text_y = shape.y + margin;
+                let margin_left = shape.text_margin_left;
+                let margin_top = shape.text_margin_top;
+                let margin_right = shape.text_margin_right;
+                let _margin_bottom = shape.text_margin_bottom;
+                let mut text_y = shape.y + margin_top;
 
                 for para in paragraphs {
                     let indent = para.level as f64 * 18.0;
 
-                    // Concatenate all runs to get full paragraph text
-                    let mut full_text = String::new();
+                    // Add bullet if present
+                    let mut para_text = String::new();
                     if let Some(ref bullet) = para.bullet {
-                        full_text.push_str(bullet);
-                        full_text.push(' ');
+                        para_text.push_str(bullet);
+                        para_text.push(' ');
                     }
 
-                    // Use first run's style for paragraph
-                    let first_run = para.runs.first();
-                    let font_size = first_run.map_or(18.0, |r| r.font_size);
-                    let bold = first_run.map_or(false, |r| r.bold);
-                    let italic = first_run.map_or(false, |r| r.italic);
-                    let color = first_run.and_then(|r| r.color).unwrap_or(Color::BLACK);
-
+                    // Concatenate all run texts to get full paragraph
                     for run in &para.runs {
-                        full_text.push_str(&run.text);
+                        para_text.push_str(&run.text);
                     }
 
-                    if !full_text.trim().is_empty() {
+                    if !para_text.trim().is_empty() {
+                        // Get font size from first run for line height calculation
+                        let first_run = para.runs.first();
+                        let font_size = first_run.map_or(18.0, |r| r.font_size);
                         let line_height = font_size * 1.3;
 
                         // Word-wrap the text within the shape width
-                        let available_width = shape.width - margin * 2.0 - indent;
-                        let lines = wrap_text(&full_text, available_width, font_size);
+                        let available_width = shape.width - margin_left - margin_right - indent;
+                        let lines = wrap_text(&para_text, available_width, font_size);
 
                         for line in &lines {
                             if text_y + font_size > shape.y + shape.height {
                                 break; // Clip to shape bounds
                             }
 
+                            // Render each run in the line with its own style
+                            // For now, use first run's style for the entire line (simplified approach)
+                            // TODO: Support mixed formatting within a line
+                            let bold = first_run.map_or(false, |r| r.bold);
+                            let italic = first_run.map_or(false, |r| r.italic);
+                            let color = first_run.and_then(|r| r.color).unwrap_or(Color::BLACK);
+
                             page.elements.push(PageElement::Text {
-                                x: shape.x + margin + indent,
+                                x: shape.x + margin_left + indent,
                                 y: text_y,
                                 width: available_width,
                                 text: line.clone(),
@@ -2417,6 +2484,7 @@ fn render_slide_page(
                         }
                     } else {
                         // Empty paragraph - add line spacing
+                        let font_size = para.runs.first().map_or(18.0, |r| r.font_size);
                         text_y += font_size * 0.8;
                     }
                 }
