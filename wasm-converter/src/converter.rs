@@ -142,6 +142,23 @@ pub enum GradientType {
     Radial,
 }
 
+/// パスコマンド（SVGライクなパス描画命令）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PathCommand {
+    /// 移動 (x, y)
+    MoveTo(f64, f64),
+    /// 直線 (x, y)
+    LineTo(f64, f64),
+    /// 二次ベジェ曲線 (cx, cy, x, y)
+    QuadTo(f64, f64, f64, f64),
+    /// 三次ベジェ曲線 (cx1, cy1, cx2, cy2, x, y)
+    CubicTo(f64, f64, f64, f64, f64, f64),
+    /// 弧 (rx, ry, x_rotation_deg, large_arc, sweep, x, y)
+    ArcTo(f64, f64, f64, bool, bool, f64, f64),
+    /// パスを閉じる
+    Close,
+}
+
 /// ページ要素
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PageElement {
@@ -197,6 +214,13 @@ pub enum PageElement {
         cy: f64,
         rx: f64,
         ry: f64,
+        fill: Option<Color>,
+        stroke: Option<Color>,
+        stroke_width: f64,
+    },
+    /// カスタムパス/図形
+    Path {
+        commands: Vec<PathCommand>,
         fill: Option<Color>,
         stroke: Option<Color>,
         stroke_width: f64,

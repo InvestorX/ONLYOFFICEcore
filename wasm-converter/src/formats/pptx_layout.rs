@@ -1886,10 +1886,6 @@ fn render_slide_page(
             ShapeContent::TextBox { paragraphs } => {
                 // Check for ellipse/rounded geometry
                 let is_ellipse = shape.preset_geometry.as_deref() == Some("ellipse");
-                let is_rounded = matches!(
-                    shape.preset_geometry.as_deref(),
-                    Some("roundRect") | Some("flowChartAlternateProcess")
-                );
 
                 // 3D effect: draw depth extrusion behind the shape
                 if shape.has_3d && shape.width > 0.0 && shape.height > 0.0 {
@@ -1927,37 +1923,46 @@ fn render_slide_page(
                 }
 
                 // Shape fill - use preset geometry for rendering
-                if is_ellipse {
-                    let fill_color = match &shape.fill {
-                        Some(ShapeFill::Solid(c)) => Some(*c),
-                        _ => None,
-                    };
-                    let stroke_info = shape.outline;
-                    page.elements.push(PageElement::Ellipse {
-                        cx: shape.x + shape.width / 2.0,
-                        cy: shape.y + shape.height / 2.0,
-                        rx: shape.width / 2.0,
-                        ry: shape.height / 2.0,
-                        fill: fill_color,
-                        stroke: stroke_info.map(|(c, _)| c),
-                        stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
-                    });
-                } else {
-                    // Standard rectangle or rounded rect rendering
-                    match &shape.fill {
-                        Some(ShapeFill::Solid(color)) => {
-                            if is_rounded {
-                                // Approximate rounded rect: slightly inset ellipse corners
-                                page.elements.push(PageElement::Rect {
-                                    x: shape.x,
-                                    y: shape.y,
-                                    width: shape.width,
-                                    height: shape.height,
-                                    fill: Some(*color),
-                                    stroke: None,
-                                    stroke_width: 0.0,
-                                });
-                            } else {
+                let mut shape_rendered = false;
+                // Try path-based rendering for non-trivial geometries
+                if let Some(ref geom_name) = shape.preset_geometry {
+                    if geom_name != "rect" && geom_name != "ellipse" {
+                        if let Some(path_cmds) = generate_preset_path(geom_name, shape.x, shape.y, shape.width, shape.height) {
+                            let fill_color = match &shape.fill {
+                                Some(ShapeFill::Solid(c)) => Some(*c),
+                                _ => None,
+                            };
+                            let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                            page.elements.push(PageElement::Path {
+                                commands: path_cmds,
+                                fill: fill_color,
+                                stroke: stroke_color,
+                                stroke_width: stroke_w,
+                            });
+                            shape_rendered = true;
+                        }
+                    }
+                }
+                if !shape_rendered {
+                    if is_ellipse {
+                        let fill_color = match &shape.fill {
+                            Some(ShapeFill::Solid(c)) => Some(*c),
+                            _ => None,
+                        };
+                        let stroke_info = shape.outline;
+                        page.elements.push(PageElement::Ellipse {
+                            cx: shape.x + shape.width / 2.0,
+                            cy: shape.y + shape.height / 2.0,
+                            rx: shape.width / 2.0,
+                            ry: shape.height / 2.0,
+                            fill: fill_color,
+                            stroke: stroke_info.map(|(c, _)| c),
+                            stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
+                        });
+                    } else {
+                        // Standard rectangle or rounded rect rendering
+                        match &shape.fill {
+                            Some(ShapeFill::Solid(color)) => {
                                 page.elements.push(PageElement::Rect {
                                     x: shape.x,
                                     y: shape.y,
@@ -1968,30 +1973,30 @@ fn render_slide_page(
                                     stroke_width: 0.0,
                                 });
                             }
+                            Some(ShapeFill::Gradient { stops, angle }) => {
+                                page.elements.push(PageElement::GradientRect {
+                                    x: shape.x,
+                                    y: shape.y,
+                                    width: shape.width,
+                                    height: shape.height,
+                                    stops: stops.clone(),
+                                    gradient_type: GradientType::Linear(*angle),
+                                });
+                            }
+                            Some(ShapeFill::Image { data, mime_type }) => {
+                                page.elements.push(PageElement::Image {
+                                    x: shape.x,
+                                    y: shape.y,
+                                    width: shape.width,
+                                    height: shape.height,
+                                    data: data.clone(),
+                                    mime_type: mime_type.clone(),
+                                });
+                            }
+                            None => {}
                         }
-                        Some(ShapeFill::Gradient { stops, angle }) => {
-                            page.elements.push(PageElement::GradientRect {
-                                x: shape.x,
-                                y: shape.y,
-                                width: shape.width,
-                                height: shape.height,
-                                stops: stops.clone(),
-                                gradient_type: GradientType::Linear(*angle),
-                            });
-                        }
-                        Some(ShapeFill::Image { data, mime_type }) => {
-                            page.elements.push(PageElement::Image {
-                                x: shape.x,
-                                y: shape.y,
-                                width: shape.width,
-                                height: shape.height,
-                                data: data.clone(),
-                                mime_type: mime_type.clone(),
-                            });
-                        }
-                        None => {}
                     }
-                } // end else (non-ellipse)
+                } // end shape fill
 
                 // Shape outline
                 if let Some((color, width)) = shape.outline {
@@ -2212,6 +2217,530 @@ fn wrap_text(text: &str, available_width: f64, font_size: f64) -> Vec<String> {
     }
 
     lines
+}
+
+/// プリセットジオメトリ名からパスコマンドを生成
+/// シェイプのバウンディングボックス (x, y, width, height) を基にパスを計算
+fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Option<Vec<crate::converter::PathCommand>> {
+    use crate::converter::PathCommand;
+    use std::f64::consts::PI;
+
+    match name {
+        "triangle" | "isosTriangle" => {
+            Some(vec![
+                PathCommand::MoveTo(x + w / 2.0, y),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+            ])
+        }
+        "rtTriangle" => {
+            Some(vec![
+                PathCommand::MoveTo(x, y),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+            ])
+        }
+        "diamond" => {
+            Some(vec![
+                PathCommand::MoveTo(x + w / 2.0, y),
+                PathCommand::LineTo(x + w, y + h / 2.0),
+                PathCommand::LineTo(x + w / 2.0, y + h),
+                PathCommand::LineTo(x, y + h / 2.0),
+                PathCommand::Close,
+            ])
+        }
+        "parallelogram" => {
+            let off = w * 0.25;
+            Some(vec![
+                PathCommand::MoveTo(x + off, y),
+                PathCommand::LineTo(x + w, y),
+                PathCommand::LineTo(x + w - off, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+            ])
+        }
+        "trapezoid" => {
+            let off = w * 0.2;
+            Some(vec![
+                PathCommand::MoveTo(x + off, y),
+                PathCommand::LineTo(x + w - off, y),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+            ])
+        }
+        "pentagon" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let mut cmds = Vec::new();
+            for i in 0..5 {
+                let angle = -PI / 2.0 + 2.0 * PI * i as f64 / 5.0;
+                let px = cx + rx * angle.cos();
+                let py = cy + ry * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "hexagon" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let mut cmds = Vec::new();
+            for i in 0..6 {
+                let angle = 2.0 * PI * i as f64 / 6.0;
+                let px = cx + rx * angle.cos();
+                let py = cy + ry * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "octagon" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let mut cmds = Vec::new();
+            for i in 0..8 {
+                let angle = -PI / 8.0 + 2.0 * PI * i as f64 / 8.0;
+                let px = cx + rx * angle.cos();
+                let py = cy + ry * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "star4" | "star5" | "star6" | "star8" | "star10" | "star12" | "star16" | "star24" | "star32" => {
+            let points: usize = match name {
+                "star4" => 4,
+                "star5" => 5,
+                "star6" => 6,
+                "star8" => 8,
+                "star10" => 10,
+                "star12" => 12,
+                "star16" => 16,
+                "star24" => 24,
+                "star32" => 32,
+                _ => 5,
+            };
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let inner_ratio = 0.4;
+            let mut cmds = Vec::new();
+            for i in 0..(points * 2) {
+                let angle = -PI / 2.0 + PI * i as f64 / points as f64;
+                let (r_x, r_y) = if i % 2 == 0 { (rx, ry) } else { (rx * inner_ratio, ry * inner_ratio) };
+                let px = cx + r_x * angle.cos();
+                let py = cy + r_y * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "arc" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let steps = 32;
+            let mut cmds = Vec::new();
+            for i in 0..=steps {
+                let angle = PI + PI * i as f64 / steps as f64;
+                let px = cx + rx * angle.cos();
+                let py = cy + ry * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            Some(cmds)
+        }
+        "pie" | "pieWedge" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let start_angle = -PI / 4.0;
+            let end_angle = PI / 4.0;
+            let steps = 24;
+            let mut cmds = vec![PathCommand::MoveTo(cx, cy)];
+            for i in 0..=steps {
+                let angle = start_angle + (end_angle - start_angle) * i as f64 / steps as f64;
+                let px = cx + rx * angle.cos();
+                let py = cy + ry * angle.sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "donut" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let steps = 48;
+            let mut cmds = Vec::new();
+            for i in 0..=steps {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + rx * angle.cos();
+                let py = cy + ry * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "blockArc" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let steps = 32;
+            let mut cmds = Vec::new();
+            for i in 0..=steps {
+                let angle = PI * 0.75 + PI * 1.5 * i as f64 / steps as f64;
+                let px = cx + rx * angle.cos();
+                let py = cy + ry * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            let ir = 0.6;
+            for i in (0..=steps).rev() {
+                let angle = PI * 0.75 + PI * 1.5 * i as f64 / steps as f64;
+                let px = cx + rx * ir * angle.cos();
+                let py = cy + ry * ir * angle.sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "heart" => {
+            let cx = x + w / 2.0;
+            Some(vec![
+                PathCommand::MoveTo(cx, y + h),
+                PathCommand::CubicTo(x, y + h * 0.6, x, y, cx - w * 0.02, y + h * 0.35),
+                PathCommand::CubicTo(cx, y, cx, y, cx, y + h * 0.35),
+                PathCommand::CubicTo(cx, y, cx, y, cx + w * 0.02, y + h * 0.35),
+                PathCommand::CubicTo(x + w, y, x + w, y + h * 0.6, cx, y + h),
+                PathCommand::Close,
+            ])
+        }
+        "lightningBolt" => {
+            Some(vec![
+                PathCommand::MoveTo(x + w * 0.4, y),
+                PathCommand::LineTo(x + w * 0.65, y + h * 0.35),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.35),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.65),
+                PathCommand::LineTo(x + w * 0.55, y + h * 0.65),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x + w * 0.35, y + h * 0.55),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.55),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.4, y + h * 0.25),
+                PathCommand::Close,
+            ])
+        }
+        "rightArrow" | "arrow" => {
+            let ah = h * 0.2;
+            Some(vec![
+                PathCommand::MoveTo(x, y + ah),
+                PathCommand::LineTo(x + w * 0.6, y + ah),
+                PathCommand::LineTo(x + w * 0.6, y),
+                PathCommand::LineTo(x + w, y + h / 2.0),
+                PathCommand::LineTo(x + w * 0.6, y + h),
+                PathCommand::LineTo(x + w * 0.6, y + h - ah),
+                PathCommand::LineTo(x, y + h - ah),
+                PathCommand::Close,
+            ])
+        }
+        "leftArrow" => {
+            let ah = h * 0.2;
+            Some(vec![
+                PathCommand::MoveTo(x + w, y + ah),
+                PathCommand::LineTo(x + w * 0.4, y + ah),
+                PathCommand::LineTo(x + w * 0.4, y),
+                PathCommand::LineTo(x, y + h / 2.0),
+                PathCommand::LineTo(x + w * 0.4, y + h),
+                PathCommand::LineTo(x + w * 0.4, y + h - ah),
+                PathCommand::LineTo(x + w, y + h - ah),
+                PathCommand::Close,
+            ])
+        }
+        "upArrow" => {
+            let aw = w * 0.2;
+            Some(vec![
+                PathCommand::MoveTo(x + aw, y + h),
+                PathCommand::LineTo(x + aw, y + h * 0.4),
+                PathCommand::LineTo(x, y + h * 0.4),
+                PathCommand::LineTo(x + w / 2.0, y),
+                PathCommand::LineTo(x + w, y + h * 0.4),
+                PathCommand::LineTo(x + w - aw, y + h * 0.4),
+                PathCommand::LineTo(x + w - aw, y + h),
+                PathCommand::Close,
+            ])
+        }
+        "downArrow" => {
+            let aw = w * 0.2;
+            Some(vec![
+                PathCommand::MoveTo(x + aw, y),
+                PathCommand::LineTo(x + aw, y + h * 0.6),
+                PathCommand::LineTo(x, y + h * 0.6),
+                PathCommand::LineTo(x + w / 2.0, y + h),
+                PathCommand::LineTo(x + w, y + h * 0.6),
+                PathCommand::LineTo(x + w - aw, y + h * 0.6),
+                PathCommand::LineTo(x + w - aw, y),
+                PathCommand::Close,
+            ])
+        }
+        "leftRightArrow" | "notchedRightArrow" => {
+            let ah = h * 0.2;
+            Some(vec![
+                PathCommand::MoveTo(x, y + h / 2.0),
+                PathCommand::LineTo(x + w * 0.2, y),
+                PathCommand::LineTo(x + w * 0.2, y + ah),
+                PathCommand::LineTo(x + w * 0.8, y + ah),
+                PathCommand::LineTo(x + w * 0.8, y),
+                PathCommand::LineTo(x + w, y + h / 2.0),
+                PathCommand::LineTo(x + w * 0.8, y + h),
+                PathCommand::LineTo(x + w * 0.8, y + h - ah),
+                PathCommand::LineTo(x + w * 0.2, y + h - ah),
+                PathCommand::LineTo(x + w * 0.2, y + h),
+                PathCommand::Close,
+            ])
+        }
+        "upDownArrow" => {
+            let aw = w * 0.2;
+            Some(vec![
+                PathCommand::MoveTo(x + w / 2.0, y),
+                PathCommand::LineTo(x + w, y + h * 0.2),
+                PathCommand::LineTo(x + w - aw, y + h * 0.2),
+                PathCommand::LineTo(x + w - aw, y + h * 0.8),
+                PathCommand::LineTo(x + w, y + h * 0.8),
+                PathCommand::LineTo(x + w / 2.0, y + h),
+                PathCommand::LineTo(x, y + h * 0.8),
+                PathCommand::LineTo(x + aw, y + h * 0.8),
+                PathCommand::LineTo(x + aw, y + h * 0.2),
+                PathCommand::LineTo(x, y + h * 0.2),
+                PathCommand::Close,
+            ])
+        }
+        "chevron" | "homePlate" => {
+            Some(vec![
+                PathCommand::MoveTo(x, y),
+                PathCommand::LineTo(x + w * 0.8, y),
+                PathCommand::LineTo(x + w, y + h / 2.0),
+                PathCommand::LineTo(x + w * 0.8, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::LineTo(x + w * 0.2, y + h / 2.0),
+                PathCommand::Close,
+            ])
+        }
+        "plus" | "cross" => {
+            let t = 0.33;
+            Some(vec![
+                PathCommand::MoveTo(x + w * t, y),
+                PathCommand::LineTo(x + w * (1.0 - t), y),
+                PathCommand::LineTo(x + w * (1.0 - t), y + h * t),
+                PathCommand::LineTo(x + w, y + h * t),
+                PathCommand::LineTo(x + w, y + h * (1.0 - t)),
+                PathCommand::LineTo(x + w * (1.0 - t), y + h * (1.0 - t)),
+                PathCommand::LineTo(x + w * (1.0 - t), y + h),
+                PathCommand::LineTo(x + w * t, y + h),
+                PathCommand::LineTo(x + w * t, y + h * (1.0 - t)),
+                PathCommand::LineTo(x, y + h * (1.0 - t)),
+                PathCommand::LineTo(x, y + h * t),
+                PathCommand::LineTo(x + w * t, y + h * t),
+                PathCommand::Close,
+            ])
+        }
+        "wave" | "doubleWave" => {
+            let steps = 32;
+            let mut cmds = Vec::new();
+            let amp = h * 0.15;
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let px = x + t * w;
+                let py = y + amp * (2.0 * PI * t).sin() + amp;
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            for i in (0..=steps).rev() {
+                let t = i as f64 / steps as f64;
+                let px = x + t * w;
+                let py = y + h + amp * (2.0 * PI * t).sin() - amp;
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "ribbon" | "ribbon2" | "ellipseRibbon" | "ellipseRibbon2" => {
+            Some(vec![
+                PathCommand::MoveTo(x, y + h * 0.3),
+                PathCommand::LineTo(x + w * 0.15, y),
+                PathCommand::LineTo(x + w * 0.15, y + h * 0.2),
+                PathCommand::LineTo(x + w * 0.85, y + h * 0.2),
+                PathCommand::LineTo(x + w * 0.85, y),
+                PathCommand::LineTo(x + w, y + h * 0.3),
+                PathCommand::LineTo(x + w * 0.85, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.85, y + h),
+                PathCommand::LineTo(x + w * 0.15, y + h),
+                PathCommand::LineTo(x + w * 0.15, y + h * 0.5),
+                PathCommand::Close,
+            ])
+        }
+        "irregularSeal1" | "irregularSeal2" | "explosion1" | "explosion2" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let points = 12;
+            let mut cmds = Vec::new();
+            for i in 0..(points * 2) {
+                let angle = 2.0 * PI * i as f64 / (points * 2) as f64;
+                let jitter = if i % 2 == 0 { 1.0 } else { 0.55 + (i as f64 * 0.1).sin() * 0.15 };
+                let px = cx + rx * jitter * angle.cos();
+                let py = cy + ry * jitter * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "cloud" | "cloudCallout" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let rx = w / 2.0;
+            let ry = h / 2.0;
+            let bumps = 16;
+            let mut cmds = Vec::new();
+            for i in 0..=bumps {
+                let angle = 2.0 * PI * i as f64 / bumps as f64;
+                let bump = 1.0 + 0.12 * (angle * 4.0).sin();
+                let px = cx + rx * bump * angle.cos();
+                let py = cy + ry * bump * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "roundRect" | "flowChartAlternateProcess" => {
+            let r = (w.min(h) * 0.15).min(10.0);
+            Some(vec![
+                PathCommand::MoveTo(x + r, y),
+                PathCommand::LineTo(x + w - r, y),
+                PathCommand::QuadTo(x + w, y, x + w, y + r),
+                PathCommand::LineTo(x + w, y + h - r),
+                PathCommand::QuadTo(x + w, y + h, x + w - r, y + h),
+                PathCommand::LineTo(x + r, y + h),
+                PathCommand::QuadTo(x, y + h, x, y + h - r),
+                PathCommand::LineTo(x, y + r),
+                PathCommand::QuadTo(x, y, x + r, y),
+                PathCommand::Close,
+            ])
+        }
+        "snip1Rect" | "snip2SameRect" | "snipRoundRect" => {
+            let c = w.min(h) * 0.15;
+            Some(vec![
+                PathCommand::MoveTo(x, y),
+                PathCommand::LineTo(x + w - c, y),
+                PathCommand::LineTo(x + w, y + c),
+                PathCommand::LineTo(x + w, y + h),
+                PathCommand::LineTo(x, y + h),
+                PathCommand::Close,
+            ])
+        }
+        "can" | "flowChartMagneticDisk" => {
+            let ry_top = h * 0.12;
+            let steps = 24;
+            let cx = x + w / 2.0;
+            let mut cmds = Vec::new();
+            for i in 0..=steps {
+                let angle = PI + PI * i as f64 / steps as f64;
+                let px = cx + (w / 2.0) * angle.cos();
+                let py = y + ry_top + ry_top * angle.sin();
+                if i == 0 {
+                    cmds.push(PathCommand::MoveTo(px, py));
+                } else {
+                    cmds.push(PathCommand::LineTo(px, py));
+                }
+            }
+            cmds.push(PathCommand::LineTo(x + w, y + h - ry_top));
+            for i in 0..=steps {
+                let angle = PI * i as f64 / steps as f64;
+                let px = cx + (w / 2.0) * angle.cos();
+                let py = y + h - ry_top + ry_top * angle.sin();
+                cmds.push(PathCommand::LineTo(px, py));
+            }
+            cmds.push(PathCommand::LineTo(x, y + ry_top));
+            cmds.push(PathCommand::Close);
+            Some(cmds)
+        }
+        "moon" | "smileyFace" | "sun" | "noSmoking" | "foldedCorner"
+        | "frame" | "bevel" | "gear6" | "gear9"
+        | "flowChartProcess" | "flowChartDecision" | "flowChartTerminator"
+        | "flowChartDocument" | "flowChartPredefinedProcess" | "flowChartInputOutput"
+        | "flowChartPreparation" | "flowChartManualInput" | "flowChartManualOperation"
+        | "flowChartConnector" | "flowChartOffpageConnector" | "flowChartSort"
+        | "flowChartExtract" | "flowChartMerge" | "flowChartDelay"
+        | "flowChartDisplay" | "flowChartMultidocument" | "flowChartOnlineStorage"
+        | "actionButtonBlank" | "actionButtonHome" | "actionButtonHelp" => {
+            let r = (w.min(h) * 0.08).min(6.0);
+            Some(vec![
+                PathCommand::MoveTo(x + r, y),
+                PathCommand::LineTo(x + w - r, y),
+                PathCommand::QuadTo(x + w, y, x + w, y + r),
+                PathCommand::LineTo(x + w, y + h - r),
+                PathCommand::QuadTo(x + w, y + h, x + w - r, y + h),
+                PathCommand::LineTo(x + r, y + h),
+                PathCommand::QuadTo(x, y + h, x, y + h - r),
+                PathCommand::LineTo(x, y + r),
+                PathCommand::QuadTo(x, y, x + r, y),
+                PathCommand::Close,
+            ])
+        }
+        _ => None,
+    }
 }
 
 /// PPTXメタデータを読み取る

@@ -172,6 +172,17 @@ pub fn render_page_to_image(
                     color,
                 );
             }
+            PageElement::Path {
+                commands,
+                fill,
+                stroke,
+                stroke_width,
+            } => {
+                render_path_to_pixels(
+                    &mut pixels, width, height,
+                    commands, fill.as_ref(), stroke.as_ref(), *stroke_width, scale,
+                );
+            }
             _ => {}
         }
     }
@@ -362,6 +373,142 @@ fn render_rect_to_pixels(
         for py in y0..=y1 {
             set_pixel(pixels, img_width, x0, py, stroke_color);
             set_pixel(pixels, img_width, x1, py, stroke_color);
+        }
+    }
+}
+
+/// パスをピクセルバッファに描画（多角形塗りつぶし + ストローク）
+fn render_path_to_pixels(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    commands: &[crate::converter::PathCommand],
+    fill: Option<&Color>,
+    stroke: Option<&Color>,
+    _stroke_width: f64,
+    scale: f64,
+) {
+    use crate::converter::PathCommand;
+
+    // Flatten path commands into polygon points
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    let mut cx = 0.0;
+    let mut cy = 0.0;
+
+    for cmd in commands {
+        match cmd {
+            PathCommand::MoveTo(x, y) => {
+                cx = *x * scale;
+                cy = *y * scale;
+                points.push((cx, cy));
+            }
+            PathCommand::LineTo(x, y) => {
+                cx = *x * scale;
+                cy = *y * scale;
+                points.push((cx, cy));
+            }
+            PathCommand::QuadTo(qcx, qcy, x, y) => {
+                let qcx = *qcx * scale;
+                let qcy = *qcy * scale;
+                let ex = *x * scale;
+                let ey = *y * scale;
+                let steps = 8;
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
+                    let it = 1.0 - t;
+                    let px = it * it * cx + 2.0 * it * t * qcx + t * t * ex;
+                    let py = it * it * cy + 2.0 * it * t * qcy + t * t * ey;
+                    points.push((px, py));
+                }
+                cx = ex;
+                cy = ey;
+            }
+            PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
+                let c1x = *cx1 * scale;
+                let c1y = *cy1 * scale;
+                let c2x = *cx2 * scale;
+                let c2y = *cy2 * scale;
+                let ex = *x * scale;
+                let ey = *y * scale;
+                let steps = 12;
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
+                    let it = 1.0 - t;
+                    let px = it*it*it*cx + 3.0*it*it*t*c1x + 3.0*it*t*t*c2x + t*t*t*ex;
+                    let py = it*it*it*cy + 3.0*it*it*t*c1y + 3.0*it*t*t*c2y + t*t*t*ey;
+                    points.push((px, py));
+                }
+                cx = ex;
+                cy = ey;
+            }
+            PathCommand::ArcTo(_rx, _ry, _rot, _large, _sweep, x, y) => {
+                // Approximate arc as line segments
+                let ex = *x * scale;
+                let ey = *y * scale;
+                let steps = 12;
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
+                    let px = cx + (ex - cx) * t;
+                    let py = cy + (ey - cy) * t;
+                    points.push((px, py));
+                }
+                cx = ex;
+                cy = ey;
+            }
+            PathCommand::Close => {
+                if let Some(&first) = points.first() {
+                    points.push(first);
+                }
+            }
+        }
+    }
+
+    if points.len() < 2 {
+        return;
+    }
+
+    // Fill using scanline algorithm
+    if let Some(fill_color) = fill {
+        let min_y = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).max(0.0) as u32;
+        let max_y = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max).min(img_height as f64) as u32;
+
+        for scan_y in min_y..max_y {
+            let y_f = scan_y as f64 + 0.5;
+            let mut intersections: Vec<f64> = Vec::new();
+
+            for i in 0..points.len().saturating_sub(1) {
+                let (x1, y1) = points[i];
+                let (x2, y2) = points[i + 1];
+
+                if (y1 <= y_f && y2 > y_f) || (y2 <= y_f && y1 > y_f) {
+                    let t = (y_f - y1) / (y2 - y1);
+                    intersections.push(x1 + t * (x2 - x1));
+                }
+            }
+
+            intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            for pair in intersections.chunks(2) {
+                if pair.len() == 2 {
+                    let x_start = pair[0].max(0.0) as u32;
+                    let x_end = (pair[1] as u32).min(img_width);
+                    for px in x_start..x_end {
+                        set_pixel(pixels, img_width, px, scan_y, fill_color);
+                    }
+                }
+            }
+        }
+    }
+
+    // Stroke using line drawing
+    if let Some(stroke_color) = stroke {
+        for i in 0..points.len().saturating_sub(1) {
+            let (x1, y1) = points[i];
+            let (x2, y2) = points[i + 1];
+            render_line_to_pixels(
+                pixels, img_width, img_height,
+                x1, y1, x2, y2, 1.0, stroke_color,
+            );
         }
     }
 }

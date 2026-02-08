@@ -348,6 +348,16 @@ impl<'a> PdfWriter<'a> {
                 } => {
                     self.render_table(&mut stream, *x, *y, *width, table, page.height);
                 }
+                PageElement::Path {
+                    commands,
+                    fill,
+                    stroke,
+                    stroke_width,
+                } => {
+                    self.render_path(
+                        &mut stream, commands, fill, stroke, *stroke_width, page.height,
+                    );
+                }
             }
         }
 
@@ -631,6 +641,93 @@ impl<'a> PdfWriter<'a> {
             }
         }
         hex
+    }
+
+    /// パスをPDFストリームに出力
+    fn render_path(
+        &self,
+        stream: &mut Vec<u8>,
+        commands: &[crate::converter::PathCommand],
+        fill: &Option<Color>,
+        stroke: &Option<Color>,
+        stroke_width: f64,
+        page_height: f64,
+    ) {
+        use crate::converter::PathCommand;
+
+        let mut path_str = String::new();
+        let mut cur_x = 0.0_f64;
+        let mut cur_y = 0.0_f64;
+        for cmd in commands {
+            match cmd {
+                PathCommand::MoveTo(x, y) => {
+                    cur_x = *x;
+                    cur_y = *y;
+                    path_str.push_str(&format!("{} {} m\n", x, page_height - y));
+                }
+                PathCommand::LineTo(x, y) => {
+                    cur_x = *x;
+                    cur_y = *y;
+                    path_str.push_str(&format!("{} {} l\n", x, page_height - y));
+                }
+                PathCommand::QuadTo(qcx, qcy, x, y) => {
+                    // Convert quadratic to cubic: cp1 = cur + 2/3*(qc - cur), cp2 = end + 2/3*(qc - end)
+                    let cp1x = cur_x + 2.0 / 3.0 * (qcx - cur_x);
+                    let cp1y = cur_y + 2.0 / 3.0 * (qcy - cur_y);
+                    let cp2x = x + 2.0 / 3.0 * (qcx - x);
+                    let cp2y = y + 2.0 / 3.0 * (qcy - y);
+                    cur_x = *x;
+                    cur_y = *y;
+                    path_str.push_str(&format!(
+                        "{} {} {} {} {} {} c\n",
+                        cp1x, page_height - cp1y, cp2x, page_height - cp2y, x, page_height - y
+                    ));
+                }
+                PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
+                    cur_x = *x;
+                    cur_y = *y;
+                    path_str.push_str(&format!(
+                        "{} {} {} {} {} {} c\n",
+                        cx1, page_height - cy1, cx2, page_height - cy2, x, page_height - y
+                    ));
+                }
+                PathCommand::ArcTo(_rx, _ry, _rot, _large, _sweep, x, y) => {
+                    // Approximate as line (proper arc-to-bezier conversion is complex)
+                    cur_x = *x;
+                    cur_y = *y;
+                    path_str.push_str(&format!("{} {} l\n", x, page_height - y));
+                }
+                PathCommand::Close => {
+                    path_str.push_str("h\n");
+                }
+            }
+        }
+
+        if let Some(fill_color) = fill {
+            stream.extend_from_slice(
+                format!(
+                    "{} {} {} rg\n{}f\n",
+                    fill_color.r as f64 / 255.0,
+                    fill_color.g as f64 / 255.0,
+                    fill_color.b as f64 / 255.0,
+                    path_str
+                )
+                .as_bytes(),
+            );
+        }
+        if let Some(stroke_color) = stroke {
+            stream.extend_from_slice(
+                format!(
+                    "{} {} {} RG\n{} w\n{}S\n",
+                    stroke_color.r as f64 / 255.0,
+                    stroke_color.g as f64 / 255.0,
+                    stroke_color.b as f64 / 255.0,
+                    stroke_width,
+                    path_str
+                )
+                .as_bytes(),
+            );
+        }
     }
 
     /// ToUnicode CMapを生成
