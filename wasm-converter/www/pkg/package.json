@@ -1,0 +1,20 @@
+{
+  "name": "wasm-document-converter",
+  "type": "module",
+  "collaborators": [
+    "ONLYOFFICE Contributors"
+  ],
+  "description": "WebAssembly document converter - converts DOC, DOCX, ODT, RTF, TXT, EPUB, XPS, DjVu, XLS, XLSX, ODS, CSV, PPT, PPTX, ODP to PDF or page images (ZIP)",
+  "version": "0.1.0",
+  "license": "AGPL-3.0",
+  "files": [
+    "wasm_document_converter_bg.wasm",
+    "wasm_document_converter.js",
+    "wasm_document_converter.d.ts"
+  ],
+  "main": "wasm_document_converter.js",
+  "types": "wasm_document_converter.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
