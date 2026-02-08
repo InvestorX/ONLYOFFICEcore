@@ -228,6 +228,8 @@ struct SlideShape {
     preset_geometry: Option<String>,
     custom_path: Option<Vec<crate::converter::PathCommand>>,
     custom_path_viewport: Option<(f64, f64)>,
+    /// blipFill r:embed on the shape (resolved later)
+    fill_image_r_id: Option<String>,
 }
 
 /// シャドウ効果
@@ -429,7 +431,10 @@ fn resolve_shape_images(
     rels: &Option<String>,
     archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
 ) -> SlideShape {
-    if let ShapeContent::Image { ref r_id } = shape.content {
+    let mut s = shape;
+
+    // Resolve content image (pic element)
+    if let ShapeContent::Image { ref r_id } = s.content {
         if let Some(ref rels_xml) = rels {
             if let Some(target) = resolve_relationship(rels_xml, r_id) {
                 let img_path = if target.starts_with('/') {
@@ -440,17 +445,38 @@ fn resolve_shape_images(
                 let img_path = normalize_zip_path(&img_path);
                 if let Ok(data) = read_zip_entry_bytes(archive, &img_path) {
                     let mime = guess_mime(&img_path);
-                    let mut s = shape;
                     s.content = ShapeContent::ImageData {
                         data,
                         mime_type: mime.to_string(),
                     };
-                    return s;
                 }
             }
         }
     }
-    shape
+
+    // Resolve fill image (blipFill on shape)
+    if let Some(r_id) = s.fill_image_r_id.as_ref() {
+        if let Some(ref rels_xml) = rels {
+            if let Some(target) = resolve_relationship(rels_xml, r_id) {
+                let img_path = if target.starts_with('/') {
+                    target[1..].to_string()
+                } else {
+                    format!("ppt/slides/{}", target)
+                };
+                let img_path = normalize_zip_path(&img_path);
+                if let Ok(data) = read_zip_entry_bytes(archive, &img_path) {
+                    let mime = guess_mime(&img_path);
+                    s.fill = Some(ShapeFill::Image {
+                        data,
+                        mime_type: mime.to_string(),
+                    });
+                    s.fill_image_r_id = None;
+                }
+            }
+        }
+    }
+
+    s
 }
 
 /// ファイルパスからMIMEタイプを推測
@@ -744,6 +770,17 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
     let mut cust_path_h: f64 = 21600.0;
     let mut cust_geom_pts: Vec<(f64, f64)> = Vec::new();
 
+    // blipFill on shape (image texture fill)
+    let mut in_sp_blip_fill = false;
+    let mut cur_fill_blip_r_id = String::new();
+
+    // Style references (p:style > a:fillRef / a:lnRef)
+    let mut in_style = false;
+    let mut in_fill_ref = false;
+    let mut in_ln_ref = false;
+    let mut style_fill_color: Option<Color> = None;
+    let mut style_ln_color: Option<Color> = None;
+
     macro_rules! reset_shape_state {
         () => {
             cur_x = 0.0;
@@ -793,6 +830,13 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
             cust_path_w = 21600.0;
             cust_path_h = 21600.0;
             cust_geom_pts.clear();
+            in_sp_blip_fill = false;
+            cur_fill_blip_r_id = String::new();
+            in_style = false;
+            in_fill_ref = false;
+            in_ln_ref = false;
+            style_fill_color = None;
+            style_ln_color = None;
         };
     }
 
@@ -1023,11 +1067,49 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                     b"blipFill" if in_pic => {
                         // Image fill - look for blip with r:embed
                     }
+                    b"blipFill" if in_sp && in_sp_pr => {
+                        // Image texture fill on shape
+                        in_sp_blip_fill = true;
+                    }
                     b"blip" if in_pic => {
                         for attr in e.attributes().flatten() {
                             let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
                             if key.ends_with("embed") || key == "embed" {
                                 cur_r_id = String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
+                    b"blip" if in_sp_blip_fill => {
+                        for attr in e.attributes().flatten() {
+                            let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                            if key.ends_with("embed") || key == "embed" {
+                                cur_fill_blip_r_id = String::from_utf8_lossy(&attr.value).to_string();
+                            }
+                        }
+                    }
+                    // Style references (p:style)
+                    b"style" if (in_sp || in_pic) && !in_sp_pr => {
+                        in_style = true;
+                    }
+                    b"fillRef" if in_style => {
+                        in_fill_ref = true;
+                    }
+                    b"lnRef" if in_style => {
+                        in_ln_ref = true;
+                    }
+                    b"schemeClr" if in_fill_ref => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"val" {
+                                let val = String::from_utf8_lossy(&attr.value).to_string();
+                                style_fill_color = resolve_scheme_color(&val, theme_colors);
+                            }
+                        }
+                    }
+                    b"schemeClr" if in_ln_ref => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"val" {
+                                let val = String::from_utf8_lossy(&attr.value).to_string();
+                                style_ln_color = resolve_scheme_color(&val, theme_colors);
                             }
                         }
                     }
@@ -1197,6 +1279,30 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                     }
                 }
 
+                // Shape fill blip (empty variant)
+                if local == b"blip" && in_sp_blip_fill {
+                    for attr in e.attributes().flatten() {
+                        let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                        if key.ends_with("embed") || key == "embed" {
+                            cur_fill_blip_r_id = String::from_utf8_lossy(&attr.value).to_string();
+                        }
+                    }
+                }
+
+                // Style schemeClr (empty variant)
+                if local == b"schemeClr" && (in_fill_ref || in_ln_ref) {
+                    for attr in e.attributes().flatten() {
+                        if attr.key.as_ref() == b"val" {
+                            let val = String::from_utf8_lossy(&attr.value).to_string();
+                            if in_fill_ref {
+                                style_fill_color = resolve_scheme_color(&val, theme_colors);
+                            } else if in_ln_ref {
+                                style_ln_color = resolve_scheme_color(&val, theme_colors);
+                            }
+                        }
+                    }
+                }
+
                 // 3D effects (empty variants)
                 if (local == b"scene3d" || local == b"sp3d") && (in_sp_pr || in_sp || in_pic) {
                     cur_has_3d = true;
@@ -1265,6 +1371,17 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                                 angle: grad_angle,
                             });
                         }
+                        // Apply style-based fill/outline as fallback
+                        if cur_fill.is_none() && cur_fill_blip_r_id.is_empty() {
+                            if let Some(c) = style_fill_color {
+                                cur_fill = Some(ShapeFill::Solid(c));
+                            }
+                        }
+                        if cur_outline.is_none() {
+                            if let Some(c) = style_ln_color {
+                                cur_outline = Some((c, 1.0));
+                            }
+                        }
                         // Emit shape
                         let content = if cur_paragraphs.is_empty() && cur_runs.is_empty() {
                             ShapeContent::Empty
@@ -1287,6 +1404,7 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             preset_geometry: cur_preset_geom.clone(),
                             custom_path: if cust_path_cmds.is_empty() { None } else { Some(cust_path_cmds.clone()) },
                             custom_path_viewport: if cust_path_cmds.is_empty() { None } else { Some((cust_path_w, cust_path_h)) },
+                            fill_image_r_id: if cur_fill_blip_r_id.is_empty() { None } else { Some(cur_fill_blip_r_id.clone()) },
                         });
                         in_sp = false;
                     }
@@ -1312,6 +1430,7 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             preset_geometry: cur_preset_geom.clone(),
                             custom_path: None,
                             custom_path_viewport: None,
+                            fill_image_r_id: None,
                         });
                         in_pic = false;
                     }
@@ -1330,6 +1449,7 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             preset_geometry: None,
                             custom_path: None,
                             custom_path_viewport: None,
+                            fill_image_r_id: None,
                         });
                         in_cxn = false;
                     }
@@ -1446,6 +1566,18 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                         cur_runs.clear();
                         cur_bullet = None;
                     }
+                    b"blipFill" if in_sp_blip_fill => {
+                        in_sp_blip_fill = false;
+                    }
+                    b"style" if in_style => {
+                        in_style = false;
+                    }
+                    b"fillRef" if in_fill_ref => {
+                        in_fill_ref = false;
+                    }
+                    b"lnRef" if in_ln_ref => {
+                        in_ln_ref = false;
+                    }
                     _ => {}
                 }
                 depth -= 1;
@@ -1543,6 +1675,20 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
         let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
         let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
         Some(Color::rgb(r, g, b))
+    } else {
+        None
+    }
+}
+
+/// Resolve a schemeClr value to a Color via theme
+fn resolve_scheme_color(val: &str, theme: &ThemeColors) -> Option<Color> {
+    const VALID: &[&str] = &[
+        "tx1", "dk1", "bg1", "lt1", "dk2", "tx2", "lt2", "bg2",
+        "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
+        "hlink", "folHlink",
+    ];
+    if VALID.contains(&val) {
+        Some(theme.resolve(val))
     } else {
         None
     }
@@ -2106,6 +2252,17 @@ fn render_slide_page(
                 }
                 if !shape_rendered {
                     if is_ellipse {
+                        // Render image fill as rectangle (no elliptical clip support)
+                        if let Some(ShapeFill::Image { data, mime_type }) = &shape.fill {
+                            page.elements.push(PageElement::Image {
+                                x: shape.x,
+                                y: shape.y,
+                                width: shape.width,
+                                height: shape.height,
+                                data: data.clone(),
+                                mime_type: mime_type.clone(),
+                            });
+                        }
                         let fill_color = match &shape.fill {
                             Some(ShapeFill::Solid(c)) => Some(*c),
                             _ => None,
@@ -2120,6 +2277,7 @@ fn render_slide_page(
                             stroke: stroke_info.map(|(c, _)| c),
                             stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
                         });
+                        shape_rendered = true;
                     } else {
                         // Standard rectangle or rounded rect rendering
                         match &shape.fill {
@@ -2159,17 +2317,19 @@ fn render_slide_page(
                     }
                 } // end shape fill
 
-                // Shape outline
-                if let Some((color, width)) = shape.outline {
-                    page.elements.push(PageElement::Rect {
-                        x: shape.x,
-                        y: shape.y,
-                        width: shape.width,
-                        height: shape.height,
-                        fill: None,
-                        stroke: Some(color),
-                        stroke_width: width,
-                    });
+                // Shape outline (skip if already rendered as a path with stroke)
+                if !shape_rendered {
+                    if let Some((color, width)) = shape.outline {
+                        page.elements.push(PageElement::Rect {
+                            x: shape.x,
+                            y: shape.y,
+                            width: shape.width,
+                            height: shape.height,
+                            fill: None,
+                            stroke: Some(color),
+                            stroke_width: width,
+                        });
+                    }
                 }
 
                 // Render text paragraphs positioned within the shape
