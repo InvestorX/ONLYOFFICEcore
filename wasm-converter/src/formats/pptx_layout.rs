@@ -2216,17 +2216,29 @@ fn render_slide_page(
                             }
                         }).collect();
 
-                        let fill_color = match &shape.fill {
-                            Some(ShapeFill::Solid(c)) => Some(*c),
-                            _ => None,
-                        };
-                        let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
-                        page.elements.push(PageElement::Path {
-                            commands: scaled_cmds,
-                            fill: fill_color,
-                            stroke: stroke_color,
-                            stroke_width: stroke_w,
-                        });
+                        // Handle image fill for custom geometries
+                        if let Some(ShapeFill::Image { data, mime_type }) = &shape.fill {
+                            let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                            page.elements.push(PageElement::PathImage {
+                                commands: scaled_cmds,
+                                data: data.clone(),
+                                mime_type: mime_type.clone(),
+                                stroke: stroke_color,
+                                stroke_width: stroke_w,
+                            });
+                        } else {
+                            let fill_color = match &shape.fill {
+                                Some(ShapeFill::Solid(c)) => Some(*c),
+                                _ => None,
+                            };
+                            let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                            page.elements.push(PageElement::Path {
+                                commands: scaled_cmds,
+                                fill: fill_color,
+                                stroke: stroke_color,
+                                stroke_width: stroke_w,
+                            });
+                        }
                         shape_rendered = true;
                     }
                 }
@@ -2235,49 +2247,67 @@ fn render_slide_page(
                 if let Some(ref geom_name) = shape.preset_geometry {
                     if geom_name != "rect" && geom_name != "ellipse" {
                         if let Some(path_cmds) = generate_preset_path(geom_name, shape.x, shape.y, shape.width, shape.height) {
-                            let fill_color = match &shape.fill {
-                                Some(ShapeFill::Solid(c)) => Some(*c),
-                                _ => None,
-                            };
-                            let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
-                            page.elements.push(PageElement::Path {
-                                commands: path_cmds,
-                                fill: fill_color,
-                                stroke: stroke_color,
-                                stroke_width: stroke_w,
-                            });
+                            // Handle image fill for preset geometries
+                            if let Some(ShapeFill::Image { data, mime_type }) = &shape.fill {
+                                let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                                page.elements.push(PageElement::PathImage {
+                                    commands: path_cmds,
+                                    data: data.clone(),
+                                    mime_type: mime_type.clone(),
+                                    stroke: stroke_color,
+                                    stroke_width: stroke_w,
+                                });
+                            } else {
+                                let fill_color = match &shape.fill {
+                                    Some(ShapeFill::Solid(c)) => Some(*c),
+                                    _ => None,
+                                };
+                                let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                                page.elements.push(PageElement::Path {
+                                    commands: path_cmds,
+                                    fill: fill_color,
+                                    stroke: stroke_color,
+                                    stroke_width: stroke_w,
+                                });
+                            }
                             shape_rendered = true;
                         }
                     }
                 }
                 if !shape_rendered {
                     if is_ellipse {
-                        // Render image fill as rectangle (no elliptical clip support)
+                        // Render ellipse with image fill using elliptical clipping
                         if let Some(ShapeFill::Image { data, mime_type }) = &shape.fill {
-                            page.elements.push(PageElement::Image {
-                                x: shape.x,
-                                y: shape.y,
-                                width: shape.width,
-                                height: shape.height,
+                            let stroke_info = shape.outline;
+                            page.elements.push(PageElement::EllipseImage {
+                                cx: shape.x + shape.width / 2.0,
+                                cy: shape.y + shape.height / 2.0,
+                                rx: shape.width / 2.0,
+                                ry: shape.height / 2.0,
                                 data: data.clone(),
                                 mime_type: mime_type.clone(),
+                                stroke: stroke_info.map(|(c, _)| c),
+                                stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
                             });
+                            shape_rendered = true;
+                        } else {
+                            // Solid or gradient fill
+                            let fill_color = match &shape.fill {
+                                Some(ShapeFill::Solid(c)) => Some(*c),
+                                _ => None,
+                            };
+                            let stroke_info = shape.outline;
+                            page.elements.push(PageElement::Ellipse {
+                                cx: shape.x + shape.width / 2.0,
+                                cy: shape.y + shape.height / 2.0,
+                                rx: shape.width / 2.0,
+                                ry: shape.height / 2.0,
+                                fill: fill_color,
+                                stroke: stroke_info.map(|(c, _)| c),
+                                stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
+                            });
+                            shape_rendered = true;
                         }
-                        let fill_color = match &shape.fill {
-                            Some(ShapeFill::Solid(c)) => Some(*c),
-                            _ => None,
-                        };
-                        let stroke_info = shape.outline;
-                        page.elements.push(PageElement::Ellipse {
-                            cx: shape.x + shape.width / 2.0,
-                            cy: shape.y + shape.height / 2.0,
-                            rx: shape.width / 2.0,
-                            ry: shape.height / 2.0,
-                            fill: fill_color,
-                            stroke: stroke_info.map(|(c, _)| c),
-                            stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
-                        });
-                        shape_rendered = true;
                     } else {
                         // Standard rectangle or rounded rect rendering
                         match &shape.fill {

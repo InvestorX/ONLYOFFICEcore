@@ -6,6 +6,9 @@ authors = ["ONLYOFFICE Contributors"]
 description = "WebAssembly document converter - converts DOC, DOCX, ODT, RTF, TXT, EPUB, XPS, DjVu, XLS, XLSX, ODS, CSV, PPT, PPTX, ODP to PDF or page images (ZIP)"
 license = "AGPL-3.0"
 
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [features]
 default = []
 embed-fonts = []

@@ -340,6 +340,39 @@ impl<'a> PdfWriter<'a> {
                         page.height,
                     );
                 }
+                PageElement::EllipseImage {
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    data: _,
+                    mime_type: _,
+                    stroke,
+                    stroke_width,
+                } => {
+                    // For PDF, render image as rectangle placeholder
+                    let img_x = *cx - *rx;
+                    let img_y = *cy - *ry;
+                    let img_w = *rx * 2.0;
+                    let img_h = *ry * 2.0;
+                    let py = page.height - img_y - img_h;
+                    stream.extend_from_slice(
+                        format!(
+                            "0.88 0.88 0.88 rg\n{} {} {} {} re\nf\n\
+                             0.7 0.7 0.7 RG\n0.5 w\n{} {} {} {} re\nS\n",
+                            img_x, py, img_w, img_h,
+                            img_x, py, img_w, img_h
+                        )
+                        .as_bytes(),
+                    );
+                    // Draw ellipse outline if stroke is specified
+                    if stroke.is_some() && *stroke_width > 0.0 {
+                        self.render_ellipse(
+                            &mut stream, *cx, *cy, *rx, *ry, &None, stroke, *stroke_width,
+                            page.height,
+                        );
+                    }
+                }
                 PageElement::TableBlock {
                     x,
                     y,
@@ -357,6 +390,75 @@ impl<'a> PdfWriter<'a> {
                     self.render_path(
                         &mut stream, commands, fill, stroke, *stroke_width, page.height,
                     );
+                }
+                PageElement::PathImage {
+                    commands,
+                    data: _,
+                    mime_type: _,
+                    stroke,
+                    stroke_width,
+                } => {
+                    // For PDF, calculate bounding box and render as placeholder image
+                    let mut min_x = f64::INFINITY;
+                    let mut min_y = f64::INFINITY;
+                    let mut max_x = f64::NEG_INFINITY;
+                    let mut max_y = f64::NEG_INFINITY;
+
+                    for cmd in commands.iter() {
+                        match cmd {
+                            crate::converter::PathCommand::MoveTo(x, y)
+                            | crate::converter::PathCommand::LineTo(x, y) => {
+                                min_x = min_x.min(*x);
+                                min_y = min_y.min(*y);
+                                max_x = max_x.max(*x);
+                                max_y = max_y.max(*y);
+                            }
+                            crate::converter::PathCommand::QuadTo(cx, cy, x, y) => {
+                                // Include both control point and end point
+                                min_x = min_x.min(*cx).min(*x);
+                                min_y = min_y.min(*cy).min(*y);
+                                max_x = max_x.max(*cx).max(*x);
+                                max_y = max_y.max(*cy).max(*y);
+                            }
+                            crate::converter::PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
+                                // Include both control points and end point
+                                min_x = min_x.min(*cx1).min(*cx2).min(*x);
+                                min_y = min_y.min(*cy1).min(*cy2).min(*y);
+                                max_x = max_x.max(*cx1).max(*cx2).max(*x);
+                                max_y = max_y.max(*cy1).max(*cy2).max(*y);
+                            }
+                            crate::converter::PathCommand::ArcTo(rx, ry, _, _, _, x, y) => {
+                                // For arcs, include end point and approximate with radii
+                                min_x = min_x.min(*x).min(*x - rx);
+                                min_y = min_y.min(*y).min(*y - ry);
+                                max_x = max_x.max(*x).max(*x + rx);
+                                max_y = max_y.max(*y).max(*y + ry);
+                            }
+                            crate::converter::PathCommand::Close => {}
+                        }
+                    }
+
+                    if min_x < max_x && min_y < max_y {
+                        let img_w = max_x - min_x;
+                        let img_h = max_y - min_y;
+                        let py = page.height - min_y - img_h;
+                        stream.extend_from_slice(
+                            format!(
+                                "0.88 0.88 0.88 rg\n{} {} {} {} re\nf\n\
+                                 0.7 0.7 0.7 RG\n0.5 w\n{} {} {} {} re\nS\n",
+                                min_x, py, img_w, img_h,
+                                min_x, py, img_w, img_h
+                            )
+                            .as_bytes(),
+                        );
+                    }
+
+                    // Render the path stroke if specified
+                    if stroke.is_some() && *stroke_width > 0.0 {
+                        self.render_path(
+                            &mut stream, commands, &None, stroke, *stroke_width, page.height,
+                        );
+                    }
                 }
             }
         }

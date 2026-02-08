@@ -218,10 +218,29 @@ pub enum PageElement {
         stroke: Option<Color>,
         stroke_width: f64,
     },
+    /// 楕円クリップされた画像
+    EllipseImage {
+        cx: f64,
+        cy: f64,
+        rx: f64,
+        ry: f64,
+        data: Vec<u8>,
+        mime_type: String,
+        stroke: Option<Color>,
+        stroke_width: f64,
+    },
     /// カスタムパス/図形
     Path {
         commands: Vec<PathCommand>,
         fill: Option<Color>,
+        stroke: Option<Color>,
+        stroke_width: f64,
+    },
+    /// パスクリップされた画像
+    PathImage {
+        commands: Vec<PathCommand>,
+        data: Vec<u8>,
+        mime_type: String,
         stroke: Option<Color>,
         stroke_width: f64,
     },
