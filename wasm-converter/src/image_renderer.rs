@@ -132,6 +132,28 @@ pub fn render_page_to_image(
                     );
                 }
             }
+            PageElement::EllipseImage {
+                cx,
+                cy,
+                rx,
+                ry,
+                data,
+                mime_type,
+                stroke: _,
+                stroke_width: _,
+            } => {
+                render_ellipse_image_to_pixels(
+                    &mut pixels,
+                    width,
+                    height,
+                    *cx * scale,
+                    *cy * scale,
+                    *rx * scale,
+                    *ry * scale,
+                    data,
+                    mime_type,
+                );
+            }
             PageElement::Image {
                 x: img_x,
                 y: img_y,
@@ -181,6 +203,18 @@ pub fn render_page_to_image(
                 render_path_to_pixels(
                     &mut pixels, width, height,
                     commands, fill.as_ref(), stroke.as_ref(), *stroke_width, scale,
+                );
+            }
+            PageElement::PathImage {
+                commands,
+                data,
+                mime_type,
+                stroke: _,
+                stroke_width: _,
+            } => {
+                render_path_image_to_pixels(
+                    &mut pixels, width, height,
+                    commands, data, mime_type, scale,
                 );
             }
             _ => {}
@@ -390,22 +424,31 @@ fn render_path_to_pixels(
 ) {
     use crate::converter::PathCommand;
 
-    // Flatten path commands into polygon points
-    let mut points: Vec<(f64, f64)> = Vec::new();
+    // Parse path commands into separate subpaths
+    // Each subpath starts with MoveTo and ends with Close or another MoveTo
+    let mut subpaths: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut current_subpath: Vec<(f64, f64)> = Vec::new();
+    let mut subpath_start = (0.0, 0.0);
     let mut cx = 0.0;
     let mut cy = 0.0;
 
     for cmd in commands {
         match cmd {
             PathCommand::MoveTo(x, y) => {
+                // Start a new subpath
+                if !current_subpath.is_empty() {
+                    subpaths.push(current_subpath.clone());
+                    current_subpath.clear();
+                }
                 cx = *x * scale;
                 cy = *y * scale;
-                points.push((cx, cy));
+                subpath_start = (cx, cy);
+                current_subpath.push((cx, cy));
             }
             PathCommand::LineTo(x, y) => {
                 cx = *x * scale;
                 cy = *y * scale;
-                points.push((cx, cy));
+                current_subpath.push((cx, cy));
             }
             PathCommand::QuadTo(qcx, qcy, x, y) => {
                 let qcx = *qcx * scale;
@@ -418,7 +461,7 @@ fn render_path_to_pixels(
                     let it = 1.0 - t;
                     let px = it * it * cx + 2.0 * it * t * qcx + t * t * ex;
                     let py = it * it * cy + 2.0 * it * t * qcy + t * t * ey;
-                    points.push((px, py));
+                    current_subpath.push((px, py));
                 }
                 cx = ex;
                 cy = ey;
@@ -436,7 +479,7 @@ fn render_path_to_pixels(
                     let it = 1.0 - t;
                     let px = it*it*it*cx + 3.0*it*it*t*c1x + 3.0*it*t*t*c2x + t*t*t*ex;
                     let py = it*it*it*cy + 3.0*it*it*t*c1y + 3.0*it*t*t*c2y + t*t*t*ey;
-                    points.push((px, py));
+                    current_subpath.push((px, py));
                 }
                 cx = ex;
                 cy = ey;
@@ -450,65 +493,79 @@ fn render_path_to_pixels(
                     let t = i as f64 / steps as f64;
                     let px = cx + (ex - cx) * t;
                     let py = cy + (ey - cy) * t;
-                    points.push((px, py));
+                    current_subpath.push((px, py));
                 }
                 cx = ex;
                 cy = ey;
             }
             PathCommand::Close => {
-                if let Some(&first) = points.first() {
-                    points.push(first);
+                // Close current subpath to its starting point
+                if !current_subpath.is_empty() && current_subpath[0] != (cx, cy) {
+                    current_subpath.push(subpath_start);
                 }
             }
         }
     }
 
-    if points.len() < 2 {
+    // Add the last subpath if it exists
+    if !current_subpath.is_empty() {
+        subpaths.push(current_subpath);
+    }
+
+    if subpaths.is_empty() {
         return;
     }
 
-    // Fill using scanline algorithm
+    // Fill each subpath using scanline algorithm
     if let Some(fill_color) = fill {
-        let min_y = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).max(0.0) as u32;
-        let max_y = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max).min(img_height as f64) as u32;
-
-        for scan_y in min_y..max_y {
-            let y_f = scan_y as f64 + 0.5;
-            let mut intersections: Vec<f64> = Vec::new();
-
-            for i in 0..points.len().saturating_sub(1) {
-                let (x1, y1) = points[i];
-                let (x2, y2) = points[i + 1];
-
-                if (y1 <= y_f && y2 > y_f) || (y2 <= y_f && y1 > y_f) {
-                    let t = (y_f - y1) / (y2 - y1);
-                    intersections.push(x1 + t * (x2 - x1));
-                }
+        for subpath in &subpaths {
+            if subpath.len() < 2 {
+                continue;
             }
 
-            intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let min_y = subpath.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).max(0.0) as u32;
+            let max_y = subpath.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max).min(img_height as f64) as u32;
 
-            for pair in intersections.chunks(2) {
-                if pair.len() == 2 {
-                    let x_start = pair[0].max(0.0) as u32;
-                    let x_end = (pair[1] as u32).min(img_width);
-                    for px in x_start..x_end {
-                        set_pixel(pixels, img_width, px, scan_y, fill_color);
+            for scan_y in min_y..max_y {
+                let y_f = scan_y as f64 + 0.5;
+                let mut intersections: Vec<f64> = Vec::new();
+
+                for i in 0..subpath.len().saturating_sub(1) {
+                    let (x1, y1) = subpath[i];
+                    let (x2, y2) = subpath[i + 1];
+
+                    if (y1 <= y_f && y2 > y_f) || (y2 <= y_f && y1 > y_f) {
+                        let t = (y_f - y1) / (y2 - y1);
+                        intersections.push(x1 + t * (x2 - x1));
+                    }
+                }
+
+                intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+                for pair in intersections.chunks(2) {
+                    if pair.len() == 2 {
+                        let x_start = pair[0].max(0.0) as u32;
+                        let x_end = (pair[1] as u32).min(img_width);
+                        for px in x_start..x_end {
+                            set_pixel(pixels, img_width, px, scan_y, fill_color);
+                        }
                     }
                 }
             }
         }
     }
 
-    // Stroke using line drawing
+    // Stroke each subpath
     if let Some(stroke_color) = stroke {
-        for i in 0..points.len().saturating_sub(1) {
-            let (x1, y1) = points[i];
-            let (x2, y2) = points[i + 1];
-            render_line_to_pixels(
-                pixels, img_width, img_height,
-                x1, y1, x2, y2, 1.0, stroke_color,
-            );
+        for subpath in &subpaths {
+            for i in 0..subpath.len().saturating_sub(1) {
+                let (x1, y1) = subpath[i];
+                let (x2, y2) = subpath[i + 1];
+                render_line_to_pixels(
+                    pixels, img_width, img_height,
+                    x1, y1, x2, y2, 1.0, stroke_color,
+                );
+            }
         }
     }
 }
@@ -727,6 +784,287 @@ fn render_image_to_pixels(
         Some(&Color::rgb(180, 180, 180)),
         1.0,
     );
+}
+
+/// 楕円クリップされた画像をピクセルバッファに描画
+fn render_ellipse_image_to_pixels(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    cx: f64,
+    cy: f64,
+    rx: f64,
+    ry: f64,
+    data: &[u8],
+    _mime_type: &str,
+) {
+    // Decode the image
+    let decoded = if let Some(img) = decode_png_image(data) {
+        img
+    } else if let Some(img) = decode_jpeg_image(data) {
+        img
+    } else {
+        // Fallback: render placeholder
+        render_rect_to_pixels(
+            pixels, img_width, img_height,
+            cx - rx, cy - ry, rx * 2.0, ry * 2.0,
+            Some(&Color::rgb(220, 220, 220)),
+            Some(&Color::rgb(180, 180, 180)),
+            1.0,
+        );
+        return;
+    };
+
+    // Calculate bounds
+    let x0 = (cx - rx).max(0.0) as u32;
+    let y0 = (cy - ry).max(0.0) as u32;
+    let x1 = ((cx + rx) as u32).min(img_width);
+    let y1 = ((cy + ry) as u32).min(img_height);
+
+    // Render image with elliptical clipping
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let dx = (px as f64 - cx) / rx;
+            let dy = (py as f64 - cy) / ry;
+
+            // Check if pixel is inside ellipse
+            if dx * dx + dy * dy <= 1.0 {
+                // Map pixel to source image coordinates
+                let src_x = ((px as f64 - (cx - rx)) / (rx * 2.0) * decoded.width as f64) as u32;
+                let src_y = ((py as f64 - (cy - ry)) / (ry * 2.0) * decoded.height as f64) as u32;
+
+                if src_x < decoded.width && src_y < decoded.height {
+                    let src_idx = ((src_y * decoded.width + src_x) * 4) as usize;
+                    if src_idx + 3 < decoded.pixels.len() {
+                        let src_a = decoded.pixels[src_idx + 3] as f64 / 255.0;
+
+                        if src_a > 0.99 {
+                            // Opaque pixel: direct copy
+                            set_pixel(pixels, img_width, px, py, &Color {
+                                r: decoded.pixels[src_idx],
+                                g: decoded.pixels[src_idx + 1],
+                                b: decoded.pixels[src_idx + 2],
+                                a: 255,
+                            });
+                        } else if src_a > 0.01 {
+                            // Semi-transparent: alpha blend
+                            let dst_idx = ((py * img_width + px) * 4) as usize;
+                            if dst_idx + 3 < pixels.len() {
+                                pixels[dst_idx] = (pixels[dst_idx] as f64 * (1.0 - src_a)
+                                    + decoded.pixels[src_idx] as f64 * src_a) as u8;
+                                pixels[dst_idx + 1] = (pixels[dst_idx + 1] as f64 * (1.0 - src_a)
+                                    + decoded.pixels[src_idx + 1] as f64 * src_a) as u8;
+                                pixels[dst_idx + 2] = (pixels[dst_idx + 2] as f64 * (1.0 - src_a)
+                                    + decoded.pixels[src_idx + 2] as f64 * src_a) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// パスクリップされた画像をピクセルバッファに描画
+fn render_path_image_to_pixels(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    commands: &[crate::converter::PathCommand],
+    data: &[u8],
+    _mime_type: &str,
+    scale: f64,
+) {
+    use crate::converter::PathCommand;
+
+    // Decode the image first
+    let decoded = if let Some(img) = decode_png_image(data) {
+        img
+    } else if let Some(img) = decode_jpeg_image(data) {
+        img
+    } else {
+        // Fallback: render placeholder
+        return;
+    };
+
+    // Parse path commands into separate subpaths for clipping mask
+    let mut subpaths: Vec<Vec<(f64, f64)>> = Vec::new();
+    let mut current_subpath: Vec<(f64, f64)> = Vec::new();
+    let mut subpath_start = (0.0, 0.0);
+    let mut cx = 0.0;
+    let mut cy = 0.0;
+
+    for cmd in commands {
+        match cmd {
+            PathCommand::MoveTo(x, y) => {
+                if !current_subpath.is_empty() {
+                    subpaths.push(current_subpath.clone());
+                    current_subpath.clear();
+                }
+                cx = *x * scale;
+                cy = *y * scale;
+                subpath_start = (cx, cy);
+                current_subpath.push((cx, cy));
+            }
+            PathCommand::LineTo(x, y) => {
+                cx = *x * scale;
+                cy = *y * scale;
+                current_subpath.push((cx, cy));
+            }
+            PathCommand::QuadTo(qcx, qcy, x, y) => {
+                let qcx = *qcx * scale;
+                let qcy = *qcy * scale;
+                let ex = *x * scale;
+                let ey = *y * scale;
+                let steps = 8;
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
+                    let it = 1.0 - t;
+                    let px = it * it * cx + 2.0 * it * t * qcx + t * t * ex;
+                    let py = it * it * cy + 2.0 * it * t * qcy + t * t * ey;
+                    current_subpath.push((px, py));
+                }
+                cx = ex;
+                cy = ey;
+            }
+            PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
+                let c1x = *cx1 * scale;
+                let c1y = *cy1 * scale;
+                let c2x = *cx2 * scale;
+                let c2y = *cy2 * scale;
+                let ex = *x * scale;
+                let ey = *y * scale;
+                let steps = 12;
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
+                    let it = 1.0 - t;
+                    let px = it*it*it*cx + 3.0*it*it*t*c1x + 3.0*it*t*t*c2x + t*t*t*ex;
+                    let py = it*it*it*cy + 3.0*it*it*t*c1y + 3.0*it*t*t*c2y + t*t*t*ey;
+                    current_subpath.push((px, py));
+                }
+                cx = ex;
+                cy = ey;
+            }
+            PathCommand::ArcTo(_rx, _ry, _rot, _large, _sweep, x, y) => {
+                let ex = *x * scale;
+                let ey = *y * scale;
+                let steps = 12;
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
+                    let px = cx + (ex - cx) * t;
+                    let py = cy + (ey - cy) * t;
+                    current_subpath.push((px, py));
+                }
+                cx = ex;
+                cy = ey;
+            }
+            PathCommand::Close => {
+                if !current_subpath.is_empty() && current_subpath[0] != (cx, cy) {
+                    current_subpath.push(subpath_start);
+                }
+            }
+        }
+    }
+
+    if !current_subpath.is_empty() {
+        subpaths.push(current_subpath);
+    }
+
+    if subpaths.is_empty() {
+        return;
+    }
+
+    // Calculate bounding box of the path
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    for subpath in &subpaths {
+        for &(x, y) in subpath {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+
+    let x0 = min_x.max(0.0) as u32;
+    let y0 = min_y.max(0.0) as u32;
+    let x1 = (max_x as u32).min(img_width);
+    let y1 = (max_y as u32).min(img_height);
+    let path_width = max_x - min_x;
+    let path_height = max_y - min_y;
+
+    if path_width <= 0.0 || path_height <= 0.0 {
+        return;
+    }
+
+    // Render image with path clipping using scanline algorithm
+    for py in y0..y1 {
+        let y_f = py as f64 + 0.5;
+
+        // Find all intersections with the path at this scanline
+        let mut intersections: Vec<f64> = Vec::new();
+
+        for subpath in &subpaths {
+            if subpath.len() < 2 {
+                continue;
+            }
+
+            for i in 0..subpath.len().saturating_sub(1) {
+                let (x1, y1) = subpath[i];
+                let (x2, y2) = subpath[i + 1];
+
+                if (y1 <= y_f && y2 > y_f) || (y2 <= y_f && y1 > y_f) {
+                    let t = (y_f - y1) / (y2 - y1);
+                    intersections.push(x1 + t * (x2 - x1));
+                }
+            }
+        }
+
+        intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Fill pixels between pairs of intersections
+        for pair in intersections.chunks(2) {
+            if pair.len() == 2 {
+                let x_start = (pair[0].max(0.0) as u32).max(x0);
+                let x_end = ((pair[1] as u32).min(img_width)).min(x1);
+
+                for px in x_start..x_end {
+                    // Map pixel to source image coordinates
+                    let src_x = ((px as f64 - min_x) / path_width * decoded.width as f64) as u32;
+                    let src_y = ((py as f64 - min_y) / path_height * decoded.height as f64) as u32;
+
+                    if src_x < decoded.width && src_y < decoded.height {
+                        let src_idx = ((src_y * decoded.width + src_x) * 4) as usize;
+                        if src_idx + 3 < decoded.pixels.len() {
+                            let src_a = decoded.pixels[src_idx + 3] as f64 / 255.0;
+
+                            if src_a > 0.99 {
+                                set_pixel(pixels, img_width, px, py, &Color {
+                                    r: decoded.pixels[src_idx],
+                                    g: decoded.pixels[src_idx + 1],
+                                    b: decoded.pixels[src_idx + 2],
+                                    a: 255,
+                                });
+                            } else if src_a > 0.01 {
+                                let dst_idx = ((py * img_width + px) * 4) as usize;
+                                if dst_idx + 3 < pixels.len() {
+                                    pixels[dst_idx] = (pixels[dst_idx] as f64 * (1.0 - src_a)
+                                        + decoded.pixels[src_idx] as f64 * src_a) as u8;
+                                    pixels[dst_idx + 1] = (pixels[dst_idx + 1] as f64 * (1.0 - src_a)
+                                        + decoded.pixels[src_idx + 1] as f64 * src_a) as u8;
+                                    pixels[dst_idx + 2] = (pixels[dst_idx + 2] as f64 * (1.0 - src_a)
+                                        + decoded.pixels[src_idx + 2] as f64 * src_a) as u8;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// デコードされた画像データ

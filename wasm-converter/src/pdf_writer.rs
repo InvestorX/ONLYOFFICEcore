@@ -340,6 +340,39 @@ impl<'a> PdfWriter<'a> {
                         page.height,
                     );
                 }
+                PageElement::EllipseImage {
+                    cx,
+                    cy,
+                    rx,
+                    ry,
+                    data: _,
+                    mime_type: _,
+                    stroke,
+                    stroke_width,
+                } => {
+                    // For PDF, render image as rectangle placeholder
+                    let img_x = *cx - *rx;
+                    let img_y = *cy - *ry;
+                    let img_w = *rx * 2.0;
+                    let img_h = *ry * 2.0;
+                    let py = page.height - img_y - img_h;
+                    stream.extend_from_slice(
+                        format!(
+                            "0.88 0.88 0.88 rg\n{} {} {} {} re\nf\n\
+                             0.7 0.7 0.7 RG\n0.5 w\n{} {} {} {} re\nS\n",
+                            img_x, py, img_w, img_h,
+                            img_x, py, img_w, img_h
+                        )
+                        .as_bytes(),
+                    );
+                    // Draw ellipse outline if stroke is specified
+                    if stroke.is_some() && *stroke_width > 0.0 {
+                        self.render_ellipse(
+                            &mut stream, *cx, *cy, *rx, *ry, &None, stroke, *stroke_width,
+                            page.height,
+                        );
+                    }
+                }
                 PageElement::TableBlock {
                     x,
                     y,
@@ -357,6 +390,60 @@ impl<'a> PdfWriter<'a> {
                     self.render_path(
                         &mut stream, commands, fill, stroke, *stroke_width, page.height,
                     );
+                }
+                PageElement::PathImage {
+                    commands,
+                    data: _,
+                    mime_type: _,
+                    stroke: _,
+                    stroke_width: _,
+                } => {
+                    // For PDF, calculate bounding box and render as placeholder image
+                    let mut min_x = f64::INFINITY;
+                    let mut min_y = f64::INFINITY;
+                    let mut max_x = f64::NEG_INFINITY;
+                    let mut max_y = f64::NEG_INFINITY;
+
+                    for cmd in commands.iter() {
+                        match cmd {
+                            crate::converter::PathCommand::MoveTo(x, y)
+                            | crate::converter::PathCommand::LineTo(x, y) => {
+                                min_x = min_x.min(*x);
+                                min_y = min_y.min(*y);
+                                max_x = max_x.max(*x);
+                                max_y = max_y.max(*y);
+                            }
+                            crate::converter::PathCommand::QuadTo(_, _, x, y)
+                            | crate::converter::PathCommand::ArcTo(_, _, _, _, _, x, y) => {
+                                min_x = min_x.min(*x);
+                                min_y = min_y.min(*y);
+                                max_x = max_x.max(*x);
+                                max_y = max_y.max(*y);
+                            }
+                            crate::converter::PathCommand::CubicTo(_, _, _, _, x, y) => {
+                                min_x = min_x.min(*x);
+                                min_y = min_y.min(*y);
+                                max_x = max_x.max(*x);
+                                max_y = max_y.max(*y);
+                            }
+                            crate::converter::PathCommand::Close => {}
+                        }
+                    }
+
+                    if min_x < max_x && min_y < max_y {
+                        let img_w = max_x - min_x;
+                        let img_h = max_y - min_y;
+                        let py = page.height - min_y - img_h;
+                        stream.extend_from_slice(
+                            format!(
+                                "0.88 0.88 0.88 rg\n{} {} {} {} re\nf\n\
+                                 0.7 0.7 0.7 RG\n0.5 w\n{} {} {} {} re\nS\n",
+                                min_x, py, img_w, img_h,
+                                min_x, py, img_w, img_h
+                            )
+                            .as_bytes(),
+                        );
+                    }
                 }
             }
         }
