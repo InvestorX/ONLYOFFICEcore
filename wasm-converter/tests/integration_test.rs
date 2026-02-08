@@ -1175,3 +1175,89 @@ fn test_sample12_table_and_bg_rendering() {
     }
     assert!(font_sizes.len() > 1, "Slide 1 should have multiple font sizes, got: {:?}", font_sizes);
 }
+
+#[test]
+fn test_sample12_deep_diagnosis() {
+    let pptx_path = "/tmp/Sample_12.pptx";
+    if !std::path::Path::new(pptx_path).exists() {
+        println!("SKIP: {} not found", pptx_path);
+        return;
+    }
+    use std::io::Read;
+    let mut data = Vec::new();
+    std::fs::File::open(pptx_path).unwrap().read_to_end(&mut data).unwrap();
+
+    let doc = formats::convert_by_extension("pptx", &data).unwrap();
+    assert_eq!(doc.pages.len(), 12);
+
+    use wasm_document_converter::converter::PageElement;
+
+    for (i, page) in doc.pages.iter().enumerate() {
+        let mut img_count = 0;
+        let mut table_count = 0;
+        let mut gray_placeholder = 0;
+        let mut unresolved_imgs = 0;
+
+        for el in &page.elements {
+            match el {
+                PageElement::Image { data, mime_type, .. } => {
+                    img_count += 1;
+                    let is_png = data.len() >= 4 && data[0..4] == [0x89, 0x50, 0x4E, 0x47];
+                    let is_jpeg = data.len() >= 3 && data[0..2] == [0xFF, 0xD8];
+                    eprintln!("  Slide {}: Image {} bytes, mime={}, png={}, jpeg={}", 
+                        i+1, data.len(), mime_type, is_png, is_jpeg);
+                }
+                PageElement::TableBlock { table, .. } => {
+                    table_count += 1;
+                    eprintln!("  Slide {}: Table {}rows x {}cols", 
+                        i+1, table.rows.len(), table.column_widths.len());
+                    for (ri, row) in table.rows.iter().enumerate().take(2) {
+                        let texts: Vec<&str> = row.iter().map(|c| c.text.as_str()).collect();
+                        eprintln!("    Row {}: {:?}", ri, texts);
+                    }
+                }
+                PageElement::Rect { fill, .. } => {
+                    if let Some(c) = fill {
+                        if c.r == 230 && c.g == 230 && c.b == 230 {
+                            gray_placeholder += 1;
+                        }
+                    }
+                }
+                PageElement::Text { text, .. } => {
+                    if text == "[Image]" {
+                        unresolved_imgs += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        eprintln!("Slide {}: elements={} images={} tables={} gray={} unresolved={}", 
+            i+1, page.elements.len(), img_count, table_count, gray_placeholder, unresolved_imgs);
+    }
+
+    // Verify slide 1 has images (not just gray placeholders)
+    let slide1 = &doc.pages[0];
+    let image_elements: Vec<_> = slide1.elements.iter().filter(|e| matches!(e, PageElement::Image { .. })).collect();
+    let gray_count = slide1.elements.iter().filter(|e| {
+        if let PageElement::Rect { fill: Some(c), .. } = e {
+            c.r == 230 && c.g == 230 && c.b == 230
+        } else { false }
+    }).count();
+    let unresolved_count = slide1.elements.iter().filter(|e| {
+        if let PageElement::Text { text, .. } = e { text == "[Image]" } else { false }
+    }).count();
+    eprintln!("Slide 1: {} images, {} gray placeholders, {} unresolved", 
+        image_elements.len(), gray_count, unresolved_count);
+
+    // Slide 1 should have at least one resolved image (it has background + pics)
+    assert!(image_elements.len() >= 1 || gray_count == 0, 
+        "Slide 1 should have images, not gray placeholders");
+
+    // Slides 6, 7 should have tables
+    for slide_idx in [5, 6] {
+        let slide = &doc.pages[slide_idx];
+        let table_elems: Vec<_> = slide.elements.iter().filter(|e| matches!(e, PageElement::TableBlock { .. })).collect();
+        assert!(!table_elems.is_empty(), "Slide {} should have tables", slide_idx + 1);
+    }
+}
