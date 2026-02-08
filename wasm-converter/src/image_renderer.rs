@@ -139,8 +139,8 @@ pub fn render_page_to_image(
                 ry,
                 data,
                 mime_type,
-                stroke: _,
-                stroke_width: _,
+                stroke,
+                stroke_width,
             } => {
                 render_ellipse_image_to_pixels(
                     &mut pixels,
@@ -153,6 +153,22 @@ pub fn render_page_to_image(
                     data,
                     mime_type,
                 );
+                // Render stroke if specified
+                if let Some(stroke_color) = stroke {
+                    if *stroke_width > 0.0 {
+                        render_ellipse_stroke_to_pixels(
+                            &mut pixels,
+                            width,
+                            height,
+                            *cx * scale,
+                            *cy * scale,
+                            *rx * scale,
+                            *ry * scale,
+                            stroke_color,
+                            *stroke_width * scale,
+                        );
+                    }
+                }
             }
             PageElement::Image {
                 x: img_x,
@@ -209,13 +225,27 @@ pub fn render_page_to_image(
                 commands,
                 data,
                 mime_type,
-                stroke: _,
-                stroke_width: _,
+                stroke,
+                stroke_width,
             } => {
+                // First render the clipped image
                 render_path_image_to_pixels(
                     &mut pixels, width, height,
                     commands, data, mime_type, scale,
                 );
+                // Then render stroke if specified
+                if let Some(stroke_color) = stroke.as_ref() {
+                    if *stroke_width > 0.0 {
+                        render_path_to_pixels(
+                            &mut pixels, width, height,
+                            commands,
+                            None,
+                            Some(stroke_color),
+                            *stroke_width,
+                            scale,
+                        );
+                    }
+                }
             }
             _ => {}
         }
@@ -411,21 +441,14 @@ fn render_rect_to_pixels(
     }
 }
 
-/// パスをピクセルバッファに描画（多角形塗りつぶし + ストローク）
-fn render_path_to_pixels(
-    pixels: &mut [u8],
-    img_width: u32,
-    img_height: u32,
+/// Parse path commands into separate subpaths (helper function)
+/// Each subpath starts with MoveTo and ends with Close or another MoveTo
+fn parse_path_commands_to_subpaths(
     commands: &[crate::converter::PathCommand],
-    fill: Option<&Color>,
-    stroke: Option<&Color>,
-    _stroke_width: f64,
     scale: f64,
-) {
+) -> Vec<Vec<(f64, f64)>> {
     use crate::converter::PathCommand;
 
-    // Parse path commands into separate subpaths
-    // Each subpath starts with MoveTo and ends with Close or another MoveTo
     let mut subpaths: Vec<Vec<(f64, f64)>> = Vec::new();
     let mut current_subpath: Vec<(f64, f64)> = Vec::new();
     let mut subpath_start = (0.0, 0.0);
@@ -437,8 +460,7 @@ fn render_path_to_pixels(
             PathCommand::MoveTo(x, y) => {
                 // Start a new subpath
                 if !current_subpath.is_empty() {
-                    subpaths.push(current_subpath.clone());
-                    current_subpath.clear();
+                    subpaths.push(std::mem::take(&mut current_subpath));
                 }
                 cx = *x * scale;
                 cy = *y * scale;
@@ -503,6 +525,9 @@ fn render_path_to_pixels(
                 if !current_subpath.is_empty() && current_subpath[0] != (cx, cy) {
                     current_subpath.push(subpath_start);
                 }
+                // After closing, the current point becomes the subpath start
+                cx = subpath_start.0;
+                cy = subpath_start.1;
             }
         }
     }
@@ -512,31 +537,61 @@ fn render_path_to_pixels(
         subpaths.push(current_subpath);
     }
 
+    subpaths
+}
+
+/// パスをピクセルバッファに描画（多角形塗りつぶし + ストローク）
+fn render_path_to_pixels(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    commands: &[crate::converter::PathCommand],
+    fill: Option<&Color>,
+    stroke: Option<&Color>,
+    _stroke_width: f64,
+    scale: f64,
+) {
+    // Parse path commands into separate subpaths using helper function
+    let subpaths = parse_path_commands_to_subpaths(commands, scale);
+
     if subpaths.is_empty() {
         return;
     }
 
-    // Fill each subpath using scanline algorithm
+    // Fill all subpaths using even-odd fill rule (handles shapes with holes)
     if let Some(fill_color) = fill {
-        for subpath in &subpaths {
-            if subpath.len() < 2 {
-                continue;
+        if !subpaths.is_empty() {
+            // Find the bounding box for all subpaths combined
+            let mut min_y = f64::INFINITY;
+            let mut max_y = f64::NEG_INFINITY;
+            for subpath in &subpaths {
+                for &(_, y) in subpath {
+                    min_y = min_y.min(y);
+                    max_y = max_y.max(y);
+                }
             }
+            let min_y = min_y.max(0.0) as u32;
+            let max_y = max_y.min(img_height as f64) as u32;
 
-            let min_y = subpath.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).max(0.0) as u32;
-            let max_y = subpath.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max).min(img_height as f64) as u32;
-
+            // Scanline algorithm with even-odd fill rule
             for scan_y in min_y..max_y {
                 let y_f = scan_y as f64 + 0.5;
                 let mut intersections: Vec<f64> = Vec::new();
 
-                for i in 0..subpath.len().saturating_sub(1) {
-                    let (x1, y1) = subpath[i];
-                    let (x2, y2) = subpath[i + 1];
+                // Collect intersections from ALL subpaths
+                for subpath in &subpaths {
+                    if subpath.len() < 2 {
+                        continue;
+                    }
 
-                    if (y1 <= y_f && y2 > y_f) || (y2 <= y_f && y1 > y_f) {
-                        let t = (y_f - y1) / (y2 - y1);
-                        intersections.push(x1 + t * (x2 - x1));
+                    for i in 0..subpath.len().saturating_sub(1) {
+                        let (x1, y1) = subpath[i];
+                        let (x2, y2) = subpath[i + 1];
+
+                        if (y1 <= y_f && y2 > y_f) || (y2 <= y_f && y1 > y_f) {
+                            let t = (y_f - y1) / (y2 - y1);
+                            intersections.push(x1 + t * (x2 - x1));
+                        }
                     }
                 }
 
@@ -554,6 +609,7 @@ fn render_path_to_pixels(
                     })
                 });
 
+                // Even-odd rule: fill between pairs of intersections
                 for pair in intersections.chunks(2) {
                     if pair.len() == 2 {
                         let x_start = pair[0].max(0.0) as u32;
@@ -767,6 +823,56 @@ fn render_ellipse_to_pixels(
     }
 }
 
+/// 楕円のストローク（輪郭）をピクセルバッファに描画
+fn render_ellipse_stroke_to_pixels(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    cx: f64,
+    cy: f64,
+    rx: f64,
+    ry: f64,
+    color: &Color,
+    stroke_width: f64,
+) {
+    // Use scanline-based approach for ellipse stroke
+    // Draw the outer ellipse and exclude the inner ellipse
+    let outer_rx = rx + stroke_width / 2.0;
+    let outer_ry = ry + stroke_width / 2.0;
+    let inner_rx = (rx - stroke_width / 2.0).max(0.0);
+    let inner_ry = (ry - stroke_width / 2.0).max(0.0);
+
+    let x0 = (cx - outer_rx).max(0.0) as u32;
+    let y0 = (cy - outer_ry).max(0.0) as u32;
+    let x1 = ((cx + outer_rx) as u32).min(img_width);
+    let y1 = ((cy + outer_ry) as u32).min(img_height);
+
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let dx_outer = (px as f64 - cx) / outer_rx;
+            let dy_outer = (py as f64 - cy) / outer_ry;
+            let dist_outer = dx_outer * dx_outer + dy_outer * dy_outer;
+
+            if dist_outer <= 1.0 {
+                // Point is inside outer ellipse
+                if inner_rx > 0.0 && inner_ry > 0.0 {
+                    let dx_inner = (px as f64 - cx) / inner_rx;
+                    let dy_inner = (py as f64 - cy) / inner_ry;
+                    let dist_inner = dx_inner * dx_inner + dy_inner * dy_inner;
+
+                    if dist_inner > 1.0 {
+                        // Point is outside inner ellipse -> it's in the stroke area
+                        set_pixel(pixels, img_width, px, py, color);
+                    }
+                } else {
+                    // No inner ellipse (stroke is too wide), fill everything
+                    set_pixel(pixels, img_width, px, py, color);
+                }
+            }
+        }
+    }
+}
+
 /// 画像をピクセルバッファに描画（JPEG/PNGデコード）
 fn render_image_to_pixels(
     pixels: &mut [u8],
@@ -887,8 +993,6 @@ fn render_path_image_to_pixels(
     _mime_type: &str,
     scale: f64,
 ) {
-    use crate::converter::PathCommand;
-
     // Decode the image first
     let decoded = if let Some(img) = decode_png_image(data) {
         img
@@ -899,88 +1003,8 @@ fn render_path_image_to_pixels(
         return;
     };
 
-    // Parse path commands into separate subpaths for clipping mask
-    let mut subpaths: Vec<Vec<(f64, f64)>> = Vec::new();
-    let mut current_subpath: Vec<(f64, f64)> = Vec::new();
-    let mut subpath_start = (0.0, 0.0);
-    let mut cx = 0.0;
-    let mut cy = 0.0;
-
-    for cmd in commands {
-        match cmd {
-            PathCommand::MoveTo(x, y) => {
-                if !current_subpath.is_empty() {
-                    subpaths.push(current_subpath.clone());
-                    current_subpath.clear();
-                }
-                cx = *x * scale;
-                cy = *y * scale;
-                subpath_start = (cx, cy);
-                current_subpath.push((cx, cy));
-            }
-            PathCommand::LineTo(x, y) => {
-                cx = *x * scale;
-                cy = *y * scale;
-                current_subpath.push((cx, cy));
-            }
-            PathCommand::QuadTo(qcx, qcy, x, y) => {
-                let qcx = *qcx * scale;
-                let qcy = *qcy * scale;
-                let ex = *x * scale;
-                let ey = *y * scale;
-                let steps = 8;
-                for i in 1..=steps {
-                    let t = i as f64 / steps as f64;
-                    let it = 1.0 - t;
-                    let px = it * it * cx + 2.0 * it * t * qcx + t * t * ex;
-                    let py = it * it * cy + 2.0 * it * t * qcy + t * t * ey;
-                    current_subpath.push((px, py));
-                }
-                cx = ex;
-                cy = ey;
-            }
-            PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
-                let c1x = *cx1 * scale;
-                let c1y = *cy1 * scale;
-                let c2x = *cx2 * scale;
-                let c2y = *cy2 * scale;
-                let ex = *x * scale;
-                let ey = *y * scale;
-                let steps = 12;
-                for i in 1..=steps {
-                    let t = i as f64 / steps as f64;
-                    let it = 1.0 - t;
-                    let px = it*it*it*cx + 3.0*it*it*t*c1x + 3.0*it*t*t*c2x + t*t*t*ex;
-                    let py = it*it*it*cy + 3.0*it*it*t*c1y + 3.0*it*t*t*c2y + t*t*t*ey;
-                    current_subpath.push((px, py));
-                }
-                cx = ex;
-                cy = ey;
-            }
-            PathCommand::ArcTo(_rx, _ry, _rot, _large, _sweep, x, y) => {
-                let ex = *x * scale;
-                let ey = *y * scale;
-                let steps = 12;
-                for i in 1..=steps {
-                    let t = i as f64 / steps as f64;
-                    let px = cx + (ex - cx) * t;
-                    let py = cy + (ey - cy) * t;
-                    current_subpath.push((px, py));
-                }
-                cx = ex;
-                cy = ey;
-            }
-            PathCommand::Close => {
-                if !current_subpath.is_empty() && current_subpath[0] != (cx, cy) {
-                    current_subpath.push(subpath_start);
-                }
-            }
-        }
-    }
-
-    if !current_subpath.is_empty() {
-        subpaths.push(current_subpath);
-    }
+    // Parse path commands into separate subpaths for clipping mask using helper function
+    let subpaths = parse_path_commands_to_subpaths(commands, scale);
 
     if subpaths.is_empty() {
         return;
