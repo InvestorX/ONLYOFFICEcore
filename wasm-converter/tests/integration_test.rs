@@ -1051,3 +1051,82 @@ fn test_chart_xml_parsing() {
     let area_elements = chart::render_chart(area_xml, 0.0, 0.0, 400.0, 300.0);
     assert!(area_elements.len() > 5, "面グラフ要素が少なすぎます: {}", area_elements.len());
 }
+
+// --- 外部フォント読み込みテスト ---
+
+#[test]
+fn test_external_font_loading() {
+    let mut fm = FontManager::new();
+    
+    // 初期状態: 外部フォントなし
+    assert_eq!(fm.external_font_count(), 0);
+    
+    // 外部フォントを追加（ダミーデータ）
+    let dummy_font = vec![0u8; 100];
+    fm.add_font("TestFont".to_string(), dummy_font.clone());
+    
+    assert_eq!(fm.external_font_count(), 1);
+    assert!(fm.has_any_font());
+    
+    // フォント名で検索
+    let data = fm.get_font_data("TestFont");
+    assert!(data.is_some());
+    assert_eq!(data.unwrap().len(), 100);
+    
+    // 部分一致検索
+    let data2 = fm.get_font_data("Test");
+    assert!(data2.is_some());
+    
+    // best_font_data は外部フォントを優先
+    let best = fm.best_font_data();
+    assert!(best.is_some());
+    assert_eq!(best.unwrap().len(), 100);
+    
+    // 複数フォント追加
+    fm.add_font("AnotherFont".to_string(), vec![1u8; 200]);
+    assert_eq!(fm.external_font_count(), 2);
+    
+    let fonts = fm.available_fonts();
+    assert!(fonts.contains(&"TestFont".to_string()));
+    assert!(fonts.contains(&"AnotherFont".to_string()));
+    
+    // フォント削除
+    fm.remove_font("TestFont");
+    assert_eq!(fm.external_font_count(), 1);
+    assert!(fm.get_font_data("TestFont").is_none());
+    
+    // 同名フォントの置き換え
+    fm.add_font("AnotherFont".to_string(), vec![2u8; 300]);
+    assert_eq!(fm.external_font_count(), 1);
+    assert_eq!(fm.get_font_data("AnotherFont").unwrap().len(), 300);
+}
+
+#[test]
+fn test_font_resolve_cjk_names() {
+    let fm = FontManager::new();
+    
+    // CJKフォント名はbest_font_dataにフォールバック
+    // (embed-fontsなしでは内蔵フォントもないのでNone)
+    let resolved = fm.resolve_font("MS Gothic");
+    // embed-fontsなしの場合はNone、ありの場合はSome
+    if fm.has_any_font() {
+        assert!(resolved.is_some());
+    } else {
+        assert!(resolved.is_none());
+    }
+}
+
+#[test]
+fn test_pdf_with_external_font_manager() {
+    let mut fm = FontManager::new();
+    // ダミーフォント（不正なTTFだがPDF生成はクラッシュしない）
+    fm.add_font("CustomFont".to_string(), vec![0u8; 50]);
+    
+    let input = "外部フォント付きPDFテスト".as_bytes();
+    let doc = formats::convert_by_extension("txt", input).unwrap();
+    
+    // render_to_pdf_with_fonts で外部フォントマネージャーを渡す
+    let pdf = pdf_writer::render_to_pdf_with_fonts(&doc, &fm);
+    assert!(pdf.starts_with(b"%PDF"));
+    assert!(pdf.len() > 100);
+}

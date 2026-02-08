@@ -30,18 +30,46 @@ impl WasmConverter {
         }
     }
 
-    /// 外部フォントデータを追加
-    /// @param name フォント名
-    /// @param data フォントファイルのバイト列
+    /// 外部フォントデータを追加（実行時にフォントを読み込み）
+    /// コンパイル後でも外部からフォントを追加できます。
+    /// TTFまたはOTFフォーマットのバイト列を受け付けます。
+    /// @param name フォント名（例: "NotoSansJP-Regular", "Meiryo"）
+    /// @param data フォントファイルのバイト列（Uint8Array）
     #[wasm_bindgen(js_name = addFont)]
     pub fn add_font(&mut self, name: String, data: Vec<u8>) {
         self.font_manager.add_font(name, data);
+    }
+
+    /// 外部フォントを削除
+    /// @param name 削除するフォント名
+    #[wasm_bindgen(js_name = removeFont)]
+    pub fn remove_font(&mut self, name: &str) {
+        self.font_manager.remove_font(name);
     }
 
     /// 日本語内蔵フォントが利用可能かどうか
     #[wasm_bindgen(js_name = hasJapaneseFont)]
     pub fn has_japanese_font(&self) -> bool {
         self.font_manager.has_builtin_japanese_font()
+    }
+
+    /// いずれかのフォントが利用可能かどうか（外部フォント含む）
+    #[wasm_bindgen(js_name = hasAnyFont)]
+    pub fn has_any_font(&self) -> bool {
+        self.font_manager.has_any_font()
+    }
+
+    /// 利用可能なフォント名の一覧をJSON配列で取得
+    #[wasm_bindgen(js_name = listFonts)]
+    pub fn list_fonts(&self) -> String {
+        let fonts = self.font_manager.available_fonts();
+        serde_json::to_string(&fonts).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// 読み込まれた外部フォントの数を取得
+    #[wasm_bindgen(js_name = externalFontCount)]
+    pub fn external_font_count(&self) -> usize {
+        self.font_manager.external_font_count()
     }
 
     /// サポートされているフォーマット一覧をJSON文字列で取得
@@ -75,7 +103,7 @@ impl WasmConverter {
 
         let doc = formats::convert_by_extension(ext, data).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        Ok(pdf_writer::render_to_pdf(&doc))
+        Ok(pdf_writer::render_to_pdf_with_fonts(&doc, &self.font_manager))
     }
 
     /// ファイルを画像に変換してZIPで返す

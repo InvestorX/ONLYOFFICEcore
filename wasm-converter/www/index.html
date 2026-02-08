@@ -223,6 +223,35 @@
         </header>
 
         <div class="card">
+            <h2>🔤 フォント管理</h2>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+                外部フォント（.ttf, .otf）を読み込むことで描画の再現性が向上します。<br>
+                内蔵フォント: Noto Sans JP / LINE Seed JP（embed-fontsフィーチャーでビルド時に埋め込み）
+            </p>
+            <div class="drop-zone" id="fontDropZone" style="padding: 1.5rem 1rem;">
+                <div class="icon" style="font-size: 2rem;">🔤</div>
+                <p>フォントファイルをドラッグ＆ドロップ、またはクリックして追加</p>
+                <p class="formats">.ttf, .otf ファイル対応</p>
+            </div>
+            <input type="file" id="fontFileInput" accept=".ttf,.otf,.woff,.woff2" multiple>
+            <div id="fontList" style="margin-top: 0.75rem;"></div>
+            <div style="margin-top: 0.75rem;">
+                <label style="font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; display: block;">
+                    URLからフォントを読み込み
+                </label>
+                <div style="display: flex; gap: 0.5rem;">
+                    <input type="text" id="fontUrl" placeholder="https://example.com/font.ttf"
+                           style="flex: 1; padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem;">
+                    <input type="text" id="fontUrlName" placeholder="フォント名"
+                           style="width: 150px; padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem;">
+                    <button class="btn btn-primary" id="loadFontUrl" style="padding: 0.5rem 1rem; font-size: 0.85rem;">
+                        読み込み
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
             <h2>📁 ファイル選択</h2>
             <div class="drop-zone" id="dropZone">
                 <div class="icon">📎</div>
@@ -276,14 +305,14 @@
                     <tr><td>テキスト</td><td>.txt</td><td><span class="badge full">完全対応</span></td></tr>
                     <tr><td>CSV</td><td>.csv</td><td><span class="badge full">完全対応</span></td></tr>
                     <tr><td>RTF</td><td>.rtf</td><td><span class="badge partial">テキスト抽出</span></td></tr>
-                    <tr><td>Microsoft Word</td><td>.docx</td><td><span class="badge partial">テキスト抽出</span></td></tr>
+                    <tr><td>Microsoft Word</td><td>.docx</td><td><span class="badge full">レイアウト保持</span></td></tr>
                     <tr><td>Microsoft Word (旧)</td><td>.doc</td><td><span class="badge stub">開発中</span></td></tr>
                     <tr><td>OpenDocument Text</td><td>.odt</td><td><span class="badge stub">開発中</span></td></tr>
                     <tr><td>EPUB</td><td>.epub</td><td><span class="badge stub">開発中</span></td></tr>
                     <tr><td>XPS</td><td>.xps</td><td><span class="badge stub">開発中</span></td></tr>
                     <tr><td>DjVu</td><td>.djvu</td><td><span class="badge stub">開発中</span></td></tr>
-                    <tr><td>Microsoft Excel</td><td>.xlsx, .xls, .ods</td><td><span class="badge partial">テーブル表示</span></td></tr>
-                    <tr><td>Microsoft PowerPoint</td><td>.pptx</td><td><span class="badge stub">開発中</span></td></tr>
+                    <tr><td>Microsoft Excel</td><td>.xlsx, .xls, .ods</td><td><span class="badge full">テーブル表示</span></td></tr>
+                    <tr><td>Microsoft PowerPoint</td><td>.pptx</td><td><span class="badge full">レイアウト保持</span></td></tr>
                     <tr><td>Microsoft PowerPoint (旧)</td><td>.ppt</td><td><span class="badge stub">開発中</span></td></tr>
                     <tr><td>OpenDocument Presentation</td><td>.odp</td><td><span class="badge stub">開発中</span></td></tr>
                 </tbody>
@@ -292,7 +321,7 @@
 
         <footer>
             <p>WASM Document Converter — Powered by Rust + WebAssembly</p>
-            <p>日本語フォント（Noto Sans JP / LINE Seed JP）内蔵</p>
+            <p>日本語フォント内蔵対応（Noto Sans JP / LINE Seed JP）+ 外部フォント実行時読み込み</p>
         </footer>
     </div>
 
@@ -311,6 +340,7 @@
                 const version = wasm.getVersion();
                 console.log('WASM Converter initialized:', version);
                 showStatus(`初期化完了: ${version}`, 'success');
+                updateFontList();
             } catch (e) {
                 console.error('WASM initialization failed:', e);
                 showStatus('WASMモジュールの読み込みに失敗しました。「./build.sh build」を実行してビルドしてください。', 'error');
@@ -331,7 +361,114 @@
         const progressBar = document.getElementById('progressBar');
         const status = document.getElementById('status');
 
+        // フォント管理UI
+        const fontDropZone = document.getElementById('fontDropZone');
+        const fontFileInput = document.getElementById('fontFileInput');
+        const fontList = document.getElementById('fontList');
+        const fontUrl = document.getElementById('fontUrl');
+        const fontUrlName = document.getElementById('fontUrlName');
+        const loadFontUrl = document.getElementById('loadFontUrl');
+
         let selectedFile = null;
+
+        // フォントリスト更新
+        function updateFontList() {
+            if (!converter) return;
+            try {
+                const fonts = JSON.parse(converter.listFonts());
+                const hasAny = converter.hasAnyFont();
+                const extCount = converter.externalFontCount();
+                let html = '';
+                if (fonts.length > 0) {
+                    html += '<div style="font-size: 0.85rem; margin-bottom: 0.5rem;">';
+                    html += `<strong>読み込み済みフォント (${fonts.length}件, 外部: ${extCount}件):</strong>`;
+                    html += '</div>';
+                    html += '<div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">';
+                    fonts.forEach(name => {
+                        html += `<span style="background: #e2e8f0; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.8rem;">${name}</span>`;
+                    });
+                    html += '</div>';
+                } else {
+                    html = '<p style="font-size: 0.85rem; color: var(--text-muted);">フォント未読み込み（外部フォントを追加すると描画品質が向上します）</p>';
+                }
+                fontList.innerHTML = html;
+            } catch (e) {
+                console.error('Font list error:', e);
+            }
+        }
+
+        // フォントファイル読み込み
+        fontDropZone.addEventListener('click', () => fontFileInput.click());
+        fontDropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            fontDropZone.classList.add('dragover');
+        });
+        fontDropZone.addEventListener('dragleave', () => {
+            fontDropZone.classList.remove('dragover');
+        });
+        fontDropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            fontDropZone.classList.remove('dragover');
+            for (const file of e.dataTransfer.files) {
+                loadFontFile(file);
+            }
+        });
+        fontFileInput.addEventListener('change', (e) => {
+            for (const file of e.target.files) {
+                loadFontFile(file);
+            }
+            fontFileInput.value = '';
+        });
+
+        async function loadFontFile(file) {
+            if (!converter) {
+                showStatus('WASMモジュールの初期化を待ってください。', 'error');
+                return;
+            }
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (!['ttf', 'otf', 'woff', 'woff2'].includes(ext)) {
+                showStatus(`フォントファイル形式が不正です: ${file.name}`, 'error');
+                return;
+            }
+            try {
+                const buffer = await file.arrayBuffer();
+                const data = new Uint8Array(buffer);
+                const name = file.name.replace(/\.[^/.]+$/, '');
+                converter.addFont(name, data);
+                showStatus(`✅ フォント「${name}」を読み込みました（${formatFileSize(data.length)}）`, 'success');
+                updateFontList();
+            } catch (e) {
+                showStatus(`フォント読み込みエラー: ${e}`, 'error');
+            }
+        }
+
+        // URLからフォント読み込み
+        loadFontUrl.addEventListener('click', async () => {
+            const url = fontUrl.value.trim();
+            const name = fontUrlName.value.trim() || url.split('/').pop().replace(/\.[^/.]+$/, '');
+            if (!url) {
+                showStatus('フォントURLを入力してください。', 'error');
+                return;
+            }
+            if (!converter) {
+                showStatus('WASMモジュールの初期化を待ってください。', 'error');
+                return;
+            }
+            try {
+                showStatus(`フォント「${name}」をダウンロード中...`, 'info');
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const buffer = await resp.arrayBuffer();
+                const data = new Uint8Array(buffer);
+                converter.addFont(name, data);
+                showStatus(`✅ フォント「${name}」をURLから読み込みました（${formatFileSize(data.length)}）`, 'success');
+                fontUrl.value = '';
+                fontUrlName.value = '';
+                updateFontList();
+            } catch (e) {
+                showStatus(`フォントダウンロードエラー: ${e}`, 'error');
+            }
+        });
 
         // ドラッグ＆ドロップ
         dropZone.addEventListener('click', () => fileInput.click());

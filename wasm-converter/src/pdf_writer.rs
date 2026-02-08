@@ -13,24 +13,16 @@ struct PdfObject {
 }
 
 /// PDF生成器
-pub struct PdfWriter {
+/// フォントマネージャーを参照として保持し、外部フォントを含むすべてのフォントを利用可能にします。
+pub struct PdfWriter<'a> {
     objects: Vec<PdfObject>,
     next_id: u32,
     page_ids: Vec<u32>,
-    font_manager: FontManager,
+    font_manager: &'a FontManager,
 }
 
-impl PdfWriter {
-    pub fn new() -> Self {
-        Self {
-            objects: Vec::new(),
-            next_id: 1,
-            page_ids: Vec::new(),
-            font_manager: FontManager::new(),
-        }
-    }
-
-    pub fn with_font_manager(font_manager: FontManager) -> Self {
+impl<'a> PdfWriter<'a> {
+    pub fn new(font_manager: &'a FontManager) -> Self {
         Self {
             objects: Vec::new(),
             next_id: 1,
@@ -60,7 +52,7 @@ impl PdfWriter {
         let tounicode_id = self.alloc_id();
 
         // フォント埋め込み用のID（フォントデータがある場合）
-        let font_file_id = if self.font_manager.has_builtin_japanese_font() {
+        let font_file_id = if self.font_manager.has_any_font() {
             Some(self.alloc_id())
         } else {
             None
@@ -149,9 +141,9 @@ impl PdfWriter {
             .into_bytes(),
         );
 
-        // フォントファイルの埋め込み
+        // フォントファイルの埋め込み（外部フォントまたは内蔵フォント）
         if let (Some(ff_id), Some(font_data)) =
-            (font_file_id, self.font_manager.builtin_japanese_font())
+            (font_file_id, self.font_manager.best_font_data())
         {
             self.add_object(
                 ff_id,
@@ -678,12 +670,13 @@ impl PdfWriter {
 
 /// ドキュメントをPDFバイト列に変換する便利関数
 pub fn render_to_pdf(doc: &Document) -> Vec<u8> {
-    let mut writer = PdfWriter::new();
-    writer.render(doc)
+    let fm = FontManager::new();
+    render_to_pdf_with_fonts(doc, &fm)
 }
 
 /// フォントマネージャーを使用してドキュメントをPDFバイト列に変換
-pub fn render_to_pdf_with_fonts(doc: &Document, font_manager: FontManager) -> Vec<u8> {
-    let mut writer = PdfWriter::with_font_manager(font_manager);
+/// 外部から読み込んだフォントを使用する場合はこちらを使用してください。
+pub fn render_to_pdf_with_fonts(doc: &Document, font_manager: &FontManager) -> Vec<u8> {
+    let mut writer = PdfWriter::new(font_manager);
     writer.render(doc)
 }

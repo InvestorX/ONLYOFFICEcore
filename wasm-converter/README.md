@@ -117,16 +117,36 @@ const zipBytes = converter.convertToImagesZip('document.xlsx', fileData, 150);
 const result = convertDocument('report.txt', textData, 'pdf');
 ```
 
-### 外部フォントの追加
+### 外部フォントの追加（実行時読み込み）
+
+コンパイル後のWASMバイナリに対して、実行時に外部フォントを読み込むことができます。
+これにより、ドキュメント内で参照されているフォントに近い描画が可能になります。
 
 ```javascript
 const converter = new WasmConverter();
 
-// フォントファイルを読み込んで追加
-const fontResponse = await fetch('MyFont.ttf');
+// ファイルから読み込み
+const fontResponse = await fetch('NotoSansJP-Regular.ttf');
 const fontData = new Uint8Array(await fontResponse.arrayBuffer());
-converter.addFont('MyFont', fontData);
+converter.addFont('NotoSansJP', fontData);
+
+// Google Fontsから読み込み
+const gfResp = await fetch('https://fonts.gstatic.com/s/notosansjp/v53/...otf');
+converter.addFont('NotoSansJP', new Uint8Array(await gfResp.arrayBuffer()));
+
+// フォント一覧の確認
+console.log(JSON.parse(converter.listFonts())); // ["NotoSansJP", ...]
+console.log(converter.hasAnyFont()); // true
+console.log(converter.externalFontCount()); // 1
+
+// フォント削除
+converter.removeFont('NotoSansJP');
 ```
+
+**注意:** フォントはPDFとPNG画像の両方の出力で使用されます。
+外部フォントが読み込まれている場合、内蔵フォントより優先されます。
+ドキュメント内で参照されるMS明朝、游ゴシック等のCJKフォント名は、
+利用可能な最適なフォントに自動的にフォールバックされます。
 
 ## アーキテクチャ
 
@@ -140,12 +160,16 @@ converter.addFont('MyFont', fontData);
 
 | モジュール | 説明 |
 |:---|:---|
-| `converter.rs` | コアトレイト・型定義（Document, Page, PageElement等） |
-| `pdf_writer.rs` | 軽量PDF生成エンジン（外部依存なし、Unicode対応） |
-| `image_renderer.rs` | ページ画像化 + ZIPバンドル |
-| `font_manager.rs` | フォント管理（日本語フォント内蔵対応） |
-| `formats/` | 各フォーマットのコンバーター実装 |
-| `lib.rs` | WASMエントリーポイント（wasm-bindgen API） |
+| `converter.rs` | コアトレイト・型定義（Document, Page, PageElement, GradientRect, Ellipse等） |
+| `pdf_writer.rs` | 軽量PDF生成エンジン（外部依存なし、Unicode対応、グラデーション、ベジェ楕円） |
+| `image_renderer.rs` | ページ画像化（JPEG/PNGデコード、グラデーション描画、楕円描画） + ZIPバンドル |
+| `font_manager.rs` | フォント管理（内蔵フォント + 実行時外部フォント読み込み、CJKフォント名自動解決） |
+| `formats/pptx_layout.rs` | PPTXコンバーター（シェイプ/塗り/グラデーション/テーマ/グループ/シャドウ/3D/チャート/SmartArt） |
+| `formats/docx_layout.rs` | DOCXコンバーター（段落/ラン書式/テーブル/画像/自動ページ分割） |
+| `formats/chart.rs` | チャートレンダリング（棒/円/面/折れ線/散布） |
+| `formats/smartart.rs` | SmartArt/ダイアグラムレンダリング |
+| `formats/` | その他のフォーマットコンバーター（txt, csv, rtf, xlsx） |
+| `lib.rs` | WASMエントリーポイント（wasm-bindgen API + フォント管理API） |
 
 ## ライセンス
 
