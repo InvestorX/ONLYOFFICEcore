@@ -101,7 +101,6 @@ fn parse_odt_content(xml: &str) -> Vec<String> {
     let mut reader = quick_xml::Reader::from_str(xml);
     let mut buf = Vec::new();
     let mut current_paragraph = String::new();
-    let mut in_text = false;
     let mut in_paragraph = false;
 
     loop {
@@ -113,14 +112,7 @@ fn parse_odt_content(xml: &str) -> Vec<String> {
                         in_paragraph = true;
                         current_paragraph.clear();
                     }
-                    b"span" if in_paragraph => {
-                        in_text = true;
-                    }
-                    _ => {
-                        if in_paragraph {
-                            in_text = true;
-                        }
-                    }
+                    _ => {}
                 }
             }
             Ok(quick_xml::events::Event::End(ref e)) => {
@@ -130,10 +122,6 @@ fn parse_odt_content(xml: &str) -> Vec<String> {
                         paragraphs.push(current_paragraph.clone());
                         current_paragraph.clear();
                         in_paragraph = false;
-                        in_text = false;
-                    }
-                    b"span" => {
-                        in_text = false;
                     }
                     _ => {}
                 }
@@ -163,7 +151,6 @@ fn parse_odt_content(xml: &str) -> Vec<String> {
     }
 
     // 空行のみの段落をフィルタリング（先頭・末尾の空段落を除去）
-    let _ = in_text; // suppress unused warning
     paragraphs
 }
 

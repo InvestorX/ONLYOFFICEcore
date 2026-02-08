@@ -230,7 +230,7 @@ fn extract_xhtml_text(xhtml: &str) -> Vec<String> {
     let mut buf = Vec::new();
     let mut current_text = String::new();
     let mut in_block = false;
-    let mut depth: i32 = 0;
+    let mut depth: u32 = 0;
 
     loop {
         match reader.read_event_into(&mut buf) {
