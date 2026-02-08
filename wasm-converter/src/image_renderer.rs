@@ -540,7 +540,19 @@ fn render_path_to_pixels(
                     }
                 }
 
-                intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                intersections.sort_by(|a, b| {
+                    // Use total ordering to ensure deterministic results
+                    a.partial_cmp(b).unwrap_or_else(|| {
+                        // Handle NaN cases: NaN values come last
+                        if a.is_nan() && b.is_nan() {
+                            std::cmp::Ordering::Equal
+                        } else if a.is_nan() {
+                            std::cmp::Ordering::Greater
+                        } else {
+                            std::cmp::Ordering::Less
+                        }
+                    })
+                });
 
                 for pair in intersections.chunks(2) {
                     if pair.len() == 2 {
@@ -1023,7 +1035,19 @@ fn render_path_image_to_pixels(
             }
         }
 
-        intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        intersections.sort_by(|a, b| {
+            // Use total ordering to ensure deterministic results
+            a.partial_cmp(b).unwrap_or_else(|| {
+                // Handle NaN cases: NaN values come last
+                if a.is_nan() && b.is_nan() {
+                    std::cmp::Ordering::Equal
+                } else if a.is_nan() {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Less
+                }
+            })
+        });
 
         // Fill pixels between pairs of intersections
         for pair in intersections.chunks(2) {
