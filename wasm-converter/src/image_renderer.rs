@@ -251,23 +251,17 @@ fn render_text_with_font(
             if let Some(outlined) = font.outline_glyph(glyph) {
                 let bounds = outlined.px_bounds();
                 outlined.draw(|gx, gy, coverage| {
-                    if coverage > 0.01 {
+                    const MIN_COVERAGE: f32 = 0.01;
+                    if coverage > MIN_COVERAGE {
                         let px = (bounds.min.x as i32 + gx as i32) as u32;
                         let py = (bounds.min.y as i32 + gy as i32) as u32;
                         if px < img_width && py < img_height {
                             let idx = ((py * img_width + px) * 4) as usize;
                             if idx + 3 < pixels.len() {
                                 let alpha = coverage.min(1.0);
-                                let inv_alpha = 1.0 - alpha;
-                                pixels[idx] = (pixels[idx] as f32 * inv_alpha
-                                    + style.color.r as f32 * alpha)
-                                    as u8;
-                                pixels[idx + 1] = (pixels[idx + 1] as f32 * inv_alpha
-                                    + style.color.g as f32 * alpha)
-                                    as u8;
-                                pixels[idx + 2] = (pixels[idx + 2] as f32 * inv_alpha
-                                    + style.color.b as f32 * alpha)
-                                    as u8;
+                                pixels[idx] = blend_channel(pixels[idx], style.color.r, alpha);
+                                pixels[idx + 1] = blend_channel(pixels[idx + 1], style.color.g, alpha);
+                                pixels[idx + 2] = blend_channel(pixels[idx + 2], style.color.b, alpha);
                                 pixels[idx + 3] = 255;
                             }
                         }
@@ -426,6 +420,12 @@ fn set_pixel(pixels: &mut [u8], width: u32, x: u32, y: u32, color: &Color) {
         pixels[idx + 2] = color.b;
         pixels[idx + 3] = color.a;
     }
+}
+
+/// アルファブレンド: 背景チャンネルと前景チャンネルをアルファ値で合成
+#[inline]
+fn blend_channel(bg: u8, fg: u8, alpha: f32) -> u8 {
+    (bg as f32 * (1.0 - alpha) + fg as f32 * alpha) as u8
 }
 
 /// グラデーション矩形をピクセルバッファに描画

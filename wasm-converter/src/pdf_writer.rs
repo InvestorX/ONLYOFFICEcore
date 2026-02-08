@@ -709,7 +709,7 @@ impl<'a> PdfWriter<'a> {
 fn text_to_winansi(text: &str) -> String {
     text.chars()
         .map(|c| {
-            if (c as u32) <= 0xFF {
+            if u32::from(c) <= 0xFF {
                 c
             } else {
                 '?'
