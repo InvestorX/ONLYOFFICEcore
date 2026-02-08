@@ -1,9 +1,5 @@
 # ビルド成果物
 target/
-# www/pkg/ はwasm-packで自動生成されます
-# wasm_document_converter.js, .wasm, .d.ts等のファイルが含まれます
-www/pkg/
-*.wasm
 
 # フォントファイル（サイズが大きいためgitに含めない）
 # ただしNotoSansJP-Regular.ttf は内蔵フォント（サブセット版、約130KB）として含める
