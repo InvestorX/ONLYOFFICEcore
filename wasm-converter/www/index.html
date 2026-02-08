@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WASM ドキュメントコンバーター</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --success: #16a34a;
+            --danger: #dc2626;
+            --bg: #f8fafc;
+            --card-bg: #ffffff;
+            --text: #1e293b;
+            --text-muted: #64748b;
+            --border: #e2e8f0;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        header h1 {
+            font-size: 1.8rem;
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+        }
+        header p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+        .card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            padding: 2rem;
+            margin-bottom: 1.5rem;
+        }
+        .card h2 {
+            font-size: 1.2rem;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .drop-zone {
+            border: 2px dashed var(--border);
+            border-radius: 8px;
+            padding: 3rem 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-bottom: 1rem;
+        }
+        .drop-zone:hover, .drop-zone.dragover {
+            border-color: var(--primary);
+            background: #eff6ff;
+        }
+        .drop-zone .icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+        .drop-zone p {
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+        }
+        .drop-zone .formats {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        input[type="file"] { display: none; }
+        .options {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin-bottom: 1rem;
+        }
+        .option-group {
+            flex: 1;
+            min-width: 200px;
+        }
+        .option-group label {
+            display: block;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+        select, input[type="number"] {
+            width: 100%;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 0.9rem;
+            background: white;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-primary:disabled {
+            background: #94a3b8;
+            cursor: not-allowed;
+        }
+        .btn-group {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+        .file-info {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 1rem;
+            background: #f1f5f9;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+        .file-info .icon { font-size: 2rem; }
+        .file-info .details { flex: 1; }
+        .file-info .name { font-weight: 600; }
+        .file-info .size { font-size: 0.85rem; color: var(--text-muted); }
+        .file-info .remove {
+            background: none;
+            border: none;
+            color: var(--danger);
+            cursor: pointer;
+            font-size: 1.2rem;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: var(--border);
+            border-radius: 3px;
+            overflow: hidden;
+            margin: 1rem 0;
+            display: none;
+        }
+        .progress-bar.active { display: block; }
+        .progress-bar .fill {
+            height: 100%;
+            background: var(--primary);
+            border-radius: 3px;
+            transition: width 0.3s;
+            animation: progress-pulse 1.5s ease-in-out infinite;
+        }
+        @keyframes progress-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .status {
+            padding: 0.75rem 1rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            margin-top: 1rem;
+            display: none;
+        }
+        .status.show { display: block; }
+        .status.success { background: #dcfce7; color: #166534; }
+        .status.error { background: #fee2e2; color: #991b1b; }
+        .status.info { background: #dbeafe; color: #1e40af; }
+        .formats-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+        .formats-table th, .formats-table td {
+            padding: 0.5rem 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        .formats-table th {
+            font-weight: 600;
+            background: #f8fafc;
+        }
+        .badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        .badge.full { background: #dcfce7; color: #166534; }
+        .badge.partial { background: #fef3c7; color: #92400e; }
+        .badge.stub { background: #e2e8f0; color: #475569; }
+        footer {
+            text-align: center;
+            margin-top: 2rem;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📄 WASM ドキュメントコンバーター</h1>
+            <p>ブラウザ上でドキュメントをPDFや画像に変換 — Rust + WebAssembly</p>
+        </header>
+
+        <div class="card">
+            <h2>🔤 フォント管理</h2>
+            <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+                外部フォント（.ttf, .otf）を読み込むことで描画の再現性が向上します。<br>
+                内蔵フォント: Noto Sans JP / LINE Seed JP（embed-fontsフィーチャーでビルド時に埋め込み）
+            </p>
+            <div class="drop-zone" id="fontDropZone" style="padding: 1.5rem 1rem;">
+                <div class="icon" style="font-size: 2rem;">🔤</div>
+                <p>フォントファイルをドラッグ＆ドロップ、またはクリックして追加</p>
+                <p class="formats">.ttf, .otf ファイル対応</p>
+            </div>
+            <input type="file" id="fontFileInput" accept=".ttf,.otf,.woff,.woff2" multiple>
+            <div id="fontList" style="margin-top: 0.75rem;"></div>
+            <div style="margin-top: 0.75rem;">
+                <label style="font-size: 0.85rem; font-weight: 600; margin-bottom: 0.5rem; display: block;">
+                    URLからフォントを読み込み
+                </label>
+                <div style="display: flex; gap: 0.5rem;">
+                    <input type="text" id="fontUrl" placeholder="https://example.com/font.ttf"
+                           style="flex: 1; padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem;">
+                    <input type="text" id="fontUrlName" placeholder="フォント名"
+                           style="width: 150px; padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem;">
+                    <button class="btn btn-primary" id="loadFontUrl" style="padding: 0.5rem 1rem; font-size: 0.85rem;">
+                        読み込み
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>📁 ファイル選択</h2>
+            <div class="drop-zone" id="dropZone">
+                <div class="icon">📎</div>
+                <p>ファイルをドラッグ＆ドロップ、またはクリックして選択</p>
+                <p class="formats">対応形式: DOC, DOCX, ODT, RTF, TXT, EPUB, XPS, DjVu, XLS, XLSX, ODS, CSV, PPT, PPTX, ODP</p>
+            </div>
+            <input type="file" id="fileInput" accept=".doc,.docx,.odt,.rtf,.txt,.epub,.xps,.djvu,.djv,.xls,.xlsx,.ods,.csv,.ppt,.pptx,.odp">
+            <div id="fileInfo" style="display:none" class="file-info">
+                <span class="icon">📄</span>
+                <div class="details">
+                    <div class="name" id="fileName"></div>
+                    <div class="size" id="fileSize"></div>
+                </div>
+                <button class="remove" id="removeFile" title="ファイルを削除">✕</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>⚙️ 変換設定</h2>
+            <div class="options">
+                <div class="option-group">
+                    <label for="outputFormat">出力形式</label>
+                    <select id="outputFormat">
+                        <option value="pdf">📕 PDF（単一ファイル）</option>
+                        <option value="images_zip">🖼️ 画像（ZIP）— ページごとにPNG</option>
+                    </select>
+                </div>
+                <div class="option-group" id="dpiGroup">
+                    <label for="dpiInput">解像度 (DPI)</label>
+                    <input type="number" id="dpiInput" value="150" min="72" max="600" step="1">
+                </div>
+            </div>
+            <div class="btn-group">
+                <button class="btn btn-primary" id="convertBtn" disabled>
+                    🔄 変換する
+                </button>
+            </div>
+            <div class="progress-bar" id="progressBar">
+                <div class="fill" style="width: 100%"></div>
+            </div>
+            <div class="status" id="status"></div>
+        </div>
+
+        <div class="card">
+            <h2>📋 対応フォーマット一覧</h2>
+            <table class="formats-table">
+                <thead>
+                    <tr><th>フォーマット</th><th>拡張子</th><th>状態</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td>テキスト</td><td>.txt</td><td><span class="badge full">完全対応</span></td></tr>
+                    <tr><td>CSV</td><td>.csv</td><td><span class="badge full">完全対応</span></td></tr>
+                    <tr><td>RTF</td><td>.rtf</td><td><span class="badge partial">テキスト抽出</span></td></tr>
+                    <tr><td>Microsoft Word</td><td>.docx</td><td><span class="badge full">レイアウト保持</span></td></tr>
+                    <tr><td>Microsoft Word (旧)</td><td>.doc</td><td><span class="badge stub">開発中</span></td></tr>
+                    <tr><td>OpenDocument Text</td><td>.odt</td><td><span class="badge stub">開発中</span></td></tr>
+                    <tr><td>EPUB</td><td>.epub</td><td><span class="badge stub">開発中</span></td></tr>
+                    <tr><td>XPS</td><td>.xps</td><td><span class="badge stub">開発中</span></td></tr>
+                    <tr><td>DjVu</td><td>.djvu</td><td><span class="badge stub">開発中</span></td></tr>
+                    <tr><td>Microsoft Excel</td><td>.xlsx, .xls, .ods</td><td><span class="badge full">テーブル表示</span></td></tr>
+                    <tr><td>Microsoft PowerPoint</td><td>.pptx</td><td><span class="badge full">レイアウト保持</span></td></tr>
+                    <tr><td>Microsoft PowerPoint (旧)</td><td>.ppt</td><td><span class="badge stub">開発中</span></td></tr>
+                    <tr><td>OpenDocument Presentation</td><td>.odp</td><td><span class="badge stub">開発中</span></td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <footer>
+            <p>WASM Document Converter — Powered by Rust + WebAssembly</p>
+            <p>日本語フォント内蔵対応（Noto Sans JP / LINE Seed JP）+ 外部フォント実行時読み込み</p>
+        </footer>
+    </div>
+
+    <script type="module">
+        // WASMモジュールの読み込み
+        let wasm;
+        let converter;
+
+        async function initWasm() {
+            try {
+                // wasm-packで生成されたモジュールを読み込む
+                wasm = await import('./pkg/wasm_document_converter.js');
+                await wasm.default();
+                converter = new wasm.WasmConverter();
+
+                const version = wasm.getVersion();
+                console.log('WASM Converter initialized:', version);
+                showStatus(`初期化完了: ${version}`, 'success');
+                updateFontList();
+            } catch (e) {
+                console.error('WASM initialization failed:', e);
+                showStatus('WASMモジュールの読み込みに失敗しました。「./build.sh build」を実行してビルドしてください。', 'error');
+            }
+        }
+
+        // UI要素
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+        const fileSize = document.getElementById('fileSize');
+        const removeFile = document.getElementById('removeFile');
+        const convertBtn = document.getElementById('convertBtn');
+        const outputFormat = document.getElementById('outputFormat');
+        const dpiInput = document.getElementById('dpiInput');
+        const dpiGroup = document.getElementById('dpiGroup');
+        const progressBar = document.getElementById('progressBar');
+        const status = document.getElementById('status');
+
+        // フォント管理UI
+        const fontDropZone = document.getElementById('fontDropZone');
+        const fontFileInput = document.getElementById('fontFileInput');
+        const fontList = document.getElementById('fontList');
+        const fontUrl = document.getElementById('fontUrl');
+        const fontUrlName = document.getElementById('fontUrlName');
+        const loadFontUrl = document.getElementById('loadFontUrl');
+
+        let selectedFile = null;
+
+        // フォントリスト更新
+        function updateFontList() {
+            if (!converter) return;
+            try {
+                const fonts = JSON.parse(converter.listFonts());
+                const hasAny = converter.hasAnyFont();
+                const extCount = converter.externalFontCount();
+                let html = '';
+                if (fonts.length > 0) {
+                    html += '<div style="font-size: 0.85rem; margin-bottom: 0.5rem;">';
+                    html += `<strong>読み込み済みフォント (${fonts.length}件, 外部: ${extCount}件):</strong>`;
+                    html += '</div>';
+                    html += '<div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">';
+                    fonts.forEach(name => {
+                        html += `<span style="background: #e2e8f0; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.8rem;">${name}</span>`;
+                    });
+                    html += '</div>';
+                } else {
+                    html = '<p style="font-size: 0.85rem; color: var(--text-muted);">フォント未読み込み（外部フォントを追加すると描画品質が向上します）</p>';
+                }
+                fontList.innerHTML = html;
+            } catch (e) {
+                console.error('Font list error:', e);
+            }
+        }
+
+        // フォントファイル読み込み
+        fontDropZone.addEventListener('click', () => fontFileInput.click());
+        fontDropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            fontDropZone.classList.add('dragover');
+        });
+        fontDropZone.addEventListener('dragleave', () => {
+            fontDropZone.classList.remove('dragover');
+        });
+        fontDropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            fontDropZone.classList.remove('dragover');
+            for (const file of e.dataTransfer.files) {
+                loadFontFile(file);
+            }
+        });
+        fontFileInput.addEventListener('change', (e) => {
+            for (const file of e.target.files) {
+                loadFontFile(file);
+            }
+            fontFileInput.value = '';
+        });
+
+        async function loadFontFile(file) {
+            if (!converter) {
+                showStatus('WASMモジュールの初期化を待ってください。', 'error');
+                return;
+            }
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (!['ttf', 'otf', 'woff', 'woff2'].includes(ext)) {
+                showStatus(`フォントファイル形式が不正です: ${file.name}`, 'error');
+                return;
+            }
+            try {
+                const buffer = await file.arrayBuffer();
+                const data = new Uint8Array(buffer);
+                const name = file.name.replace(/\.[^/.]+$/, '');
+                converter.addFont(name, data);
+                showStatus(`✅ フォント「${name}」を読み込みました（${formatFileSize(data.length)}）`, 'success');
+                updateFontList();
+            } catch (e) {
+                showStatus(`フォント読み込みエラー: ${e}`, 'error');
+            }
+        }
+
+        // URLからフォント読み込み
+        loadFontUrl.addEventListener('click', async () => {
+            const url = fontUrl.value.trim();
+            const name = fontUrlName.value.trim() || url.split('/').pop().replace(/\.[^/.]+$/, '');
+            if (!url) {
+                showStatus('フォントURLを入力してください。', 'error');
+                return;
+            }
+            if (!converter) {
+                showStatus('WASMモジュールの初期化を待ってください。', 'error');
+                return;
+            }
+            try {
+                showStatus(`フォント「${name}」をダウンロード中...`, 'info');
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const buffer = await resp.arrayBuffer();
+                const data = new Uint8Array(buffer);
+                converter.addFont(name, data);
+                showStatus(`✅ フォント「${name}」をURLから読み込みました（${formatFileSize(data.length)}）`, 'success');
+                fontUrl.value = '';
+                fontUrlName.value = '';
+                updateFontList();
+            } catch (e) {
+                showStatus(`フォントダウンロードエラー: ${e}`, 'error');
+            }
+        });
+
+        // ドラッグ＆ドロップ
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        // ファイル選択処理
+        function handleFile(file) {
+            selectedFile = file;
+            fileName.textContent = file.name;
+            fileSize.textContent = formatFileSize(file.size);
+            fileInfo.style.display = 'flex';
+            dropZone.style.display = 'none';
+            convertBtn.disabled = false;
+            hideStatus();
+        }
+
+        removeFile.addEventListener('click', () => {
+            selectedFile = null;
+            fileInfo.style.display = 'none';
+            dropZone.style.display = 'block';
+            convertBtn.disabled = true;
+            fileInput.value = '';
+            hideStatus();
+        });
+
+        // 出力形式変更
+        outputFormat.addEventListener('change', () => {
+            dpiGroup.style.display = outputFormat.value === 'images_zip' ? 'block' : 'none';
+        });
+        dpiGroup.style.display = 'none';
+
+        // 変換実行
+        convertBtn.addEventListener('click', async () => {
+            if (!selectedFile || !converter) {
+                showStatus('ファイルを選択するか、WASMモジュールの読み込みを待ってください。', 'error');
+                return;
+            }
+
+            convertBtn.disabled = true;
+            progressBar.classList.add('active');
+            showStatus('変換中...', 'info');
+
+            try {
+                const arrayBuffer = await selectedFile.arrayBuffer();
+                const data = new Uint8Array(arrayBuffer);
+                const format = outputFormat.value;
+                let result;
+
+                if (format === 'pdf') {
+                    result = converter.convertToPdf(selectedFile.name, data);
+                } else {
+                    const dpi = parseFloat(dpiInput.value) || 150;
+                    result = converter.convertToImagesZip(selectedFile.name, data, dpi);
+                }
+
+                // ダウンロード
+                const blob = new Blob([result], {
+                    type: format === 'pdf' ? 'application/pdf' : 'application/zip'
+                });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                const baseName = selectedFile.name.replace(/\.[^/.]+$/, '');
+                a.href = url;
+                a.download = format === 'pdf' ? `${baseName}.pdf` : `${baseName}_pages.zip`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                const sizeStr = formatFileSize(result.length);
+                showStatus(`✅ 変換完了！（${sizeStr}）ダウンロードが開始されます。`, 'success');
+            } catch (e) {
+                console.error('Conversion failed:', e);
+                showStatus(`❌ 変換エラー: ${e}`, 'error');
+            } finally {
+                convertBtn.disabled = false;
+                progressBar.classList.remove('active');
+            }
+        });
+
+        function showStatus(msg, type) {
+            status.textContent = msg;
+            status.className = `status show ${type}`;
+        }
+
+        function hideStatus() {
+            status.className = 'status';
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return `${bytes} B`;
+            if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+            return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+        }
+
+        // 初期化
+        initWasm();
+    </script>
+</body>
+</html>
