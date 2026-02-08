@@ -455,7 +455,7 @@ fn resolve_shape_images(
     }
 
     // Resolve fill image (blipFill on shape)
-    if let Some(ref r_id) = s.fill_image_r_id.clone() {
+    if let Some(r_id) = s.fill_image_r_id.as_ref() {
         if let Some(ref rels_xml) = rels {
             if let Some(target) = resolve_relationship(rels_xml, r_id) {
                 let img_path = if target.starts_with('/') {
@@ -1682,11 +1682,15 @@ fn parse_hex_color(hex: &str) -> Option<Color> {
 
 /// Resolve a schemeClr value to a Color via theme
 fn resolve_scheme_color(val: &str, theme: &ThemeColors) -> Option<Color> {
-    match val {
-        "tx1" | "dk1" | "bg1" | "lt1" | "dk2" | "tx2" | "lt2" | "bg2"
-        | "accent1" | "accent2" | "accent3" | "accent4" | "accent5" | "accent6"
-        | "hlink" | "folHlink" => Some(theme.resolve(val)),
-        _ => None,
+    const VALID: &[&str] = &[
+        "tx1", "dk1", "bg1", "lt1", "dk2", "tx2", "lt2", "bg2",
+        "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
+        "hlink", "folHlink",
+    ];
+    if VALID.contains(&val) {
+        Some(theme.resolve(val))
+    } else {
+        None
     }
 }
 
