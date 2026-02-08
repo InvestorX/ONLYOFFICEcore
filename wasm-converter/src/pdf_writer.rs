@@ -43,16 +43,22 @@ impl<'a> PdfWriter<'a> {
 
     /// ドキュメントをPDFバイト列に変換
     pub fn render(&mut self, doc: &Document) -> Vec<u8> {
+        let has_font = self.font_manager.has_any_font();
+
         // IDを事前割り当て
         let catalog_id = self.alloc_id();
         let pages_id = self.alloc_id();
         let font_id = self.alloc_id();
+
+        // Fallback standard font (Helvetica) for when no embedded font available
+        let fallback_font_id = self.alloc_id();
+
         let cid_font_id = self.alloc_id();
         let descriptor_id = self.alloc_id();
         let tounicode_id = self.alloc_id();
 
         // フォント埋め込み用のID（フォントデータがある場合）
-        let font_file_id = if self.font_manager.has_any_font() {
+        let font_file_id = if has_font {
             Some(self.alloc_id())
         } else {
             None
@@ -128,7 +134,7 @@ impl<'a> PdfWriter<'a> {
         desc.push_str(" >>");
         self.add_object(descriptor_id, desc.into_bytes());
 
-        // Type0フォント（複合フォント）
+        // Type0フォント（複合フォント）- /F1
         self.add_object(
             font_id,
             format!(
@@ -139,6 +145,13 @@ impl<'a> PdfWriter<'a> {
                 cid_font_id, tounicode_id
             )
             .into_bytes(),
+        );
+
+        // 標準フォント（Helvetica）- /F2: フォント未埋め込み時のフォールバック
+        self.add_object(
+            fallback_font_id,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+                .to_vec(),
         );
 
         // フォントファイルの埋め込み（外部フォントまたは内蔵フォント）
@@ -166,7 +179,7 @@ impl<'a> PdfWriter<'a> {
             let (page_id, content_id) = page_content_pairs[i];
 
             // ページコンテンツストリーム
-            let content = self.render_page_content(page);
+            let content = self.render_page_content(page, has_font);
             self.add_object(
                 content_id,
                 format!(
@@ -177,15 +190,16 @@ impl<'a> PdfWriter<'a> {
                 .into_bytes(),
             );
 
-            // ページオブジェクト
+            // ページオブジェクト（/F1: CIDフォント, /F2: Helveticaフォールバック）
             self.add_object(
                 page_id,
                 format!(
                     "<< /Type /Page /Parent {} 0 R \
                      /MediaBox [0 0 {} {}] \
                      /Contents {} 0 R \
-                     /Resources << /Font << /F1 {} 0 R >> >> >>",
-                    pages_id, page.width, page.height, content_id, font_id
+                     /Resources << /Font << /F1 {} 0 R /F2 {} 0 R >> >> >>",
+                    pages_id, page.width, page.height, content_id, font_id,
+                    fallback_font_id
                 )
                 .into_bytes(),
             );
@@ -197,7 +211,7 @@ impl<'a> PdfWriter<'a> {
     }
 
     /// ページコンテンツのPDFストリームを生成
-    fn render_page_content(&self, page: &Page) -> Vec<u8> {
+    fn render_page_content(&self, page: &Page, has_font: bool) -> Vec<u8> {
         let mut stream = Vec::new();
 
         for element in &page.elements {
@@ -210,7 +224,7 @@ impl<'a> PdfWriter<'a> {
                     style,
                     align,
                 } => {
-                    self.render_text(&mut stream, *x, *y, *width, text, style, *align, page.height);
+                    self.render_text(&mut stream, *x, *y, *width, text, style, *align, page.height, has_font);
                 }
                 PageElement::Line {
                     x1,
@@ -334,6 +348,16 @@ impl<'a> PdfWriter<'a> {
                 } => {
                     self.render_table(&mut stream, *x, *y, *width, table, page.height);
                 }
+                PageElement::Path {
+                    commands,
+                    fill,
+                    stroke,
+                    stroke_width,
+                } => {
+                    self.render_path(
+                        &mut stream, commands, fill, stroke, *stroke_width, page.height,
+                    );
+                }
             }
         }
 
@@ -351,28 +375,50 @@ impl<'a> PdfWriter<'a> {
         style: &FontStyle,
         _align: TextAlign,
         page_height: f64,
+        has_font: bool,
     ) {
         if text.is_empty() {
             return;
         }
         let pdf_y = page_height - y - style.font_size;
 
-        // テキストをUTF-16BEに変換してPDFヘックス文字列として出力
-        let hex_text = self.text_to_pdf_hex(text);
+        if has_font {
+            // CIDフォント（/F1）: UTF-16BEヘックス文字列で全Unicode対応
+            let hex_text = self.text_to_pdf_hex(text);
 
-        stream.extend_from_slice(
-            format!(
-                "BT\n/F1 {} Tf\n{} {} {} rg\n{} {} Td\n<{}> Tj\nET\n",
-                style.font_size,
-                style.color.r as f64 / 255.0,
-                style.color.g as f64 / 255.0,
-                style.color.b as f64 / 255.0,
-                x,
-                pdf_y,
-                hex_text
-            )
-            .as_bytes(),
-        );
+            stream.extend_from_slice(
+                format!(
+                    "BT\n/F1 {} Tf\n{} {} {} rg\n{} {} Td\n<{}> Tj\nET\n",
+                    style.font_size,
+                    style.color.r as f64 / 255.0,
+                    style.color.g as f64 / 255.0,
+                    style.color.b as f64 / 255.0,
+                    x,
+                    pdf_y,
+                    hex_text
+                )
+                .as_bytes(),
+            );
+        } else {
+            // フォールバック（/F2 Helvetica）: WinAnsiEncoding（Latin-1）
+            // 非ASCII文字を '?' に置換してLatin-1の範囲内に収める
+            let safe_text = text_to_winansi(text);
+            let escaped = pdf_escape_string(&safe_text);
+
+            stream.extend_from_slice(
+                format!(
+                    "BT\n/F2 {} Tf\n{} {} {} rg\n{} {} Td\n({}) Tj\nET\n",
+                    style.font_size,
+                    style.color.r as f64 / 255.0,
+                    style.color.g as f64 / 255.0,
+                    style.color.b as f64 / 255.0,
+                    x,
+                    pdf_y,
+                    escaped
+                )
+                .as_bytes(),
+            );
+        }
     }
 
     /// テーブルをPDFストリームに出力
@@ -597,6 +643,93 @@ impl<'a> PdfWriter<'a> {
         hex
     }
 
+    /// パスをPDFストリームに出力
+    fn render_path(
+        &self,
+        stream: &mut Vec<u8>,
+        commands: &[crate::converter::PathCommand],
+        fill: &Option<Color>,
+        stroke: &Option<Color>,
+        stroke_width: f64,
+        page_height: f64,
+    ) {
+        use crate::converter::PathCommand;
+
+        let mut path_str = String::new();
+        let mut cur_x = 0.0_f64;
+        let mut cur_y = 0.0_f64;
+        for cmd in commands {
+            match cmd {
+                PathCommand::MoveTo(x, y) => {
+                    cur_x = *x;
+                    cur_y = *y;
+                    path_str.push_str(&format!("{} {} m\n", x, page_height - y));
+                }
+                PathCommand::LineTo(x, y) => {
+                    cur_x = *x;
+                    cur_y = *y;
+                    path_str.push_str(&format!("{} {} l\n", x, page_height - y));
+                }
+                PathCommand::QuadTo(qcx, qcy, x, y) => {
+                    // Convert quadratic to cubic: cp1 = cur + 2/3*(qc - cur), cp2 = end + 2/3*(qc - end)
+                    let cp1x = cur_x + 2.0 / 3.0 * (qcx - cur_x);
+                    let cp1y = cur_y + 2.0 / 3.0 * (qcy - cur_y);
+                    let cp2x = x + 2.0 / 3.0 * (qcx - x);
+                    let cp2y = y + 2.0 / 3.0 * (qcy - y);
+                    cur_x = *x;
+                    cur_y = *y;
+                    path_str.push_str(&format!(
+                        "{} {} {} {} {} {} c\n",
+                        cp1x, page_height - cp1y, cp2x, page_height - cp2y, x, page_height - y
+                    ));
+                }
+                PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
+                    cur_x = *x;
+                    cur_y = *y;
+                    path_str.push_str(&format!(
+                        "{} {} {} {} {} {} c\n",
+                        cx1, page_height - cy1, cx2, page_height - cy2, x, page_height - y
+                    ));
+                }
+                PathCommand::ArcTo(_rx, _ry, _rot, _large, _sweep, x, y) => {
+                    // Approximate as line (proper arc-to-bezier conversion is complex)
+                    cur_x = *x;
+                    cur_y = *y;
+                    path_str.push_str(&format!("{} {} l\n", x, page_height - y));
+                }
+                PathCommand::Close => {
+                    path_str.push_str("h\n");
+                }
+            }
+        }
+
+        if let Some(fill_color) = fill {
+            stream.extend_from_slice(
+                format!(
+                    "{} {} {} rg\n{}f\n",
+                    fill_color.r as f64 / 255.0,
+                    fill_color.g as f64 / 255.0,
+                    fill_color.b as f64 / 255.0,
+                    path_str
+                )
+                .as_bytes(),
+            );
+        }
+        if let Some(stroke_color) = stroke {
+            stream.extend_from_slice(
+                format!(
+                    "{} {} {} RG\n{} w\n{}S\n",
+                    stroke_color.r as f64 / 255.0,
+                    stroke_color.g as f64 / 255.0,
+                    stroke_color.b as f64 / 255.0,
+                    stroke_width,
+                    path_str
+                )
+                .as_bytes(),
+            );
+        }
+    }
+
     /// ToUnicode CMapを生成
     fn create_tounicode_cmap(&self) -> String {
         // Identity CMap: CIDがそのままUnicodeコードポイントに対応
@@ -666,6 +799,34 @@ impl<'a> PdfWriter<'a> {
 
         output
     }
+}
+
+/// テキストをWinAnsiEncoding（Latin-1）に変換
+/// CIDフォントが利用できない場合に、Helveticaフォールバック用に使用
+fn text_to_winansi(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if u32::from(c) <= 0xFF {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
+/// PDFリテラル文字列用エスケープ
+fn pdf_escape_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => result.push_str("\\\\"),
+            '(' => result.push_str("\\("),
+            ')' => result.push_str("\\)"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 /// ドキュメントをPDFバイト列に変換する便利関数

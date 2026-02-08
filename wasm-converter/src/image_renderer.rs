@@ -5,6 +5,7 @@
 
 use crate::converter::{Color, Document, FontStyle, Page, PageElement};
 use crate::font_manager::FontManager;
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 
 /// 画像レンダリングの設定
 pub struct ImageRenderConfig {
@@ -36,7 +37,7 @@ pub enum ImageFormat {
 pub fn render_page_to_image(
     page: &Page,
     config: &ImageRenderConfig,
-    _font_manager: &FontManager,
+    font_manager: &FontManager,
 ) -> Vec<u8> {
     let scale = config.dpi / 72.0;
     let width = (page.width * scale) as u32;
@@ -64,6 +65,7 @@ pub fn render_page_to_image(
             } => {
                 render_text_to_pixels(
                     &mut pixels, width, height, *x, *y, text, style, scale,
+                    font_manager,
                 );
             }
             PageElement::Rect {
@@ -170,6 +172,17 @@ pub fn render_page_to_image(
                     color,
                 );
             }
+            PageElement::Path {
+                commands,
+                fill,
+                stroke,
+                stroke_width,
+            } => {
+                render_path_to_pixels(
+                    &mut pixels, width, height,
+                    commands, fill.as_ref(), stroke.as_ref(), *stroke_width, scale,
+                );
+            }
             _ => {}
         }
     }
@@ -179,10 +192,8 @@ pub fn render_page_to_image(
 }
 
 /// テキストをピクセルバッファに描画
-/// 注意: これは簡易実装であり、実際のグリフラスタライズではなく
-/// 各文字を矩形ブロックとして描画します。完全な実装では
-/// ab_glyph等のフォントラスタライザーを使用して
-/// 正確なグリフ形状をレンダリングする必要があります。
+/// ab_glyphフォントラスタライザーを使用して正確なグリフ形状をレンダリングします。
+/// フォントが利用できない場合は簡易矩形フォールバックを使用します。
 fn render_text_to_pixels(
     pixels: &mut [u8],
     img_width: u32,
@@ -192,24 +203,113 @@ fn render_text_to_pixels(
     text: &str,
     style: &FontStyle,
     scale: f64,
+    font_manager: &FontManager,
 ) {
-    // 簡易テキスト描画: 各文字を小さなドットパターンで表現
+    let font_size_px = (style.font_size * scale) as f32;
+    if font_size_px <= 0.0 || text.is_empty() {
+        return;
+    }
+
+    // Try to get font data and render with ab_glyph
+    let font_data = font_manager.resolve_font(&style.font_name)
+        .or_else(|| font_manager.best_font_data());
+
+    if let Some(data) = font_data {
+        if let Ok(font) = FontRef::try_from_slice(data) {
+            render_text_with_font(
+                pixels, img_width, img_height, x, y, text, style, scale, &font,
+            );
+            return;
+        }
+    }
+
+    // Fallback: simple rectangle rendering when no font available
+    render_text_fallback(pixels, img_width, img_height, x, y, text, style, scale);
+}
+
+/// ab_glyphフォントを使用してテキストをレンダリング
+fn render_text_with_font(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    x: f64,
+    y: f64,
+    text: &str,
+    style: &FontStyle,
+    scale: f64,
+    font: &FontRef,
+) {
+    let font_size_px = (style.font_size * scale) as f32;
+    let px_scale = PxScale::from(font_size_px);
+    let scaled_font = font.as_scaled(px_scale);
+
+    let ascent = scaled_font.ascent();
+    let start_x = (x * scale) as f32;
+    let start_y = (y * scale) as f32 + ascent;
+
+    let mut cursor_x = start_x;
+
+    for ch in text.chars() {
+        let glyph_id = font.glyph_id(ch);
+        let advance = scaled_font.h_advance(glyph_id);
+
+        if !ch.is_whitespace() {
+            let glyph = glyph_id.with_scale_and_position(
+                px_scale,
+                ab_glyph::point(cursor_x, start_y),
+            );
+
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                outlined.draw(|gx, gy, coverage| {
+                    const MIN_COVERAGE: f32 = 0.01;
+                    if coverage > MIN_COVERAGE {
+                        let px = (bounds.min.x as i32 + gx as i32) as u32;
+                        let py = (bounds.min.y as i32 + gy as i32) as u32;
+                        if px < img_width && py < img_height {
+                            let idx = ((py * img_width + px) * 4) as usize;
+                            if idx + 3 < pixels.len() {
+                                let alpha = coverage.min(1.0);
+                                pixels[idx] = blend_channel(pixels[idx], style.color.r, alpha);
+                                pixels[idx + 1] = blend_channel(pixels[idx + 1], style.color.g, alpha);
+                                pixels[idx + 2] = blend_channel(pixels[idx + 2], style.color.b, alpha);
+                                pixels[idx + 3] = 255;
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        cursor_x += advance;
+    }
+}
+
+/// フォントが利用できない場合の簡易テキスト描画フォールバック
+fn render_text_fallback(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    x: f64,
+    y: f64,
+    text: &str,
+    style: &FontStyle,
+    scale: f64,
+) {
     let px = (x * scale) as i32;
     let py = (y * scale) as i32;
     let font_px = (style.font_size * scale) as i32;
-    let char_width = font_px * 6 / 10; // 半角文字幅
+    let char_width = font_px * 6 / 10;
 
-    for (i, ch) in text.chars().enumerate() {
+    let mut cursor_x = px;
+    for ch in text.chars() {
         let cw = if ch.is_ascii() { char_width } else { font_px };
-        let cx = px + i as i32 * char_width.max(1);
-        let cy = py;
 
-        // 文字領域をフォント色で塗りつぶし（簡易表現）
         if !ch.is_whitespace() {
             for dy in 2..font_px.saturating_sub(2) {
                 for dx in 1..cw.saturating_sub(1) {
-                    let pixel_x = (cx + dx) as u32;
-                    let pixel_y = (cy + dy) as u32;
+                    let pixel_x = (cursor_x + dx) as u32;
+                    let pixel_y = (py + dy) as u32;
                     if pixel_x < img_width && pixel_y < img_height {
                         let idx = ((pixel_y * img_width + pixel_x) * 4) as usize;
                         if idx + 3 < pixels.len() {
@@ -222,6 +322,8 @@ fn render_text_to_pixels(
                 }
             }
         }
+
+        cursor_x += cw;
     }
 }
 
@@ -271,6 +373,142 @@ fn render_rect_to_pixels(
         for py in y0..=y1 {
             set_pixel(pixels, img_width, x0, py, stroke_color);
             set_pixel(pixels, img_width, x1, py, stroke_color);
+        }
+    }
+}
+
+/// パスをピクセルバッファに描画（多角形塗りつぶし + ストローク）
+fn render_path_to_pixels(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    commands: &[crate::converter::PathCommand],
+    fill: Option<&Color>,
+    stroke: Option<&Color>,
+    _stroke_width: f64,
+    scale: f64,
+) {
+    use crate::converter::PathCommand;
+
+    // Flatten path commands into polygon points
+    let mut points: Vec<(f64, f64)> = Vec::new();
+    let mut cx = 0.0;
+    let mut cy = 0.0;
+
+    for cmd in commands {
+        match cmd {
+            PathCommand::MoveTo(x, y) => {
+                cx = *x * scale;
+                cy = *y * scale;
+                points.push((cx, cy));
+            }
+            PathCommand::LineTo(x, y) => {
+                cx = *x * scale;
+                cy = *y * scale;
+                points.push((cx, cy));
+            }
+            PathCommand::QuadTo(qcx, qcy, x, y) => {
+                let qcx = *qcx * scale;
+                let qcy = *qcy * scale;
+                let ex = *x * scale;
+                let ey = *y * scale;
+                let steps = 8;
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
+                    let it = 1.0 - t;
+                    let px = it * it * cx + 2.0 * it * t * qcx + t * t * ex;
+                    let py = it * it * cy + 2.0 * it * t * qcy + t * t * ey;
+                    points.push((px, py));
+                }
+                cx = ex;
+                cy = ey;
+            }
+            PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
+                let c1x = *cx1 * scale;
+                let c1y = *cy1 * scale;
+                let c2x = *cx2 * scale;
+                let c2y = *cy2 * scale;
+                let ex = *x * scale;
+                let ey = *y * scale;
+                let steps = 12;
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
+                    let it = 1.0 - t;
+                    let px = it*it*it*cx + 3.0*it*it*t*c1x + 3.0*it*t*t*c2x + t*t*t*ex;
+                    let py = it*it*it*cy + 3.0*it*it*t*c1y + 3.0*it*t*t*c2y + t*t*t*ey;
+                    points.push((px, py));
+                }
+                cx = ex;
+                cy = ey;
+            }
+            PathCommand::ArcTo(_rx, _ry, _rot, _large, _sweep, x, y) => {
+                // Approximate arc as line segments
+                let ex = *x * scale;
+                let ey = *y * scale;
+                let steps = 12;
+                for i in 1..=steps {
+                    let t = i as f64 / steps as f64;
+                    let px = cx + (ex - cx) * t;
+                    let py = cy + (ey - cy) * t;
+                    points.push((px, py));
+                }
+                cx = ex;
+                cy = ey;
+            }
+            PathCommand::Close => {
+                if let Some(&first) = points.first() {
+                    points.push(first);
+                }
+            }
+        }
+    }
+
+    if points.len() < 2 {
+        return;
+    }
+
+    // Fill using scanline algorithm
+    if let Some(fill_color) = fill {
+        let min_y = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min).max(0.0) as u32;
+        let max_y = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max).min(img_height as f64) as u32;
+
+        for scan_y in min_y..max_y {
+            let y_f = scan_y as f64 + 0.5;
+            let mut intersections: Vec<f64> = Vec::new();
+
+            for i in 0..points.len().saturating_sub(1) {
+                let (x1, y1) = points[i];
+                let (x2, y2) = points[i + 1];
+
+                if (y1 <= y_f && y2 > y_f) || (y2 <= y_f && y1 > y_f) {
+                    let t = (y_f - y1) / (y2 - y1);
+                    intersections.push(x1 + t * (x2 - x1));
+                }
+            }
+
+            intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            for pair in intersections.chunks(2) {
+                if pair.len() == 2 {
+                    let x_start = pair[0].max(0.0) as u32;
+                    let x_end = (pair[1] as u32).min(img_width);
+                    for px in x_start..x_end {
+                        set_pixel(pixels, img_width, px, scan_y, fill_color);
+                    }
+                }
+            }
+        }
+    }
+
+    // Stroke using line drawing
+    if let Some(stroke_color) = stroke {
+        for i in 0..points.len().saturating_sub(1) {
+            let (x1, y1) = points[i];
+            let (x2, y2) = points[i + 1];
+            render_line_to_pixels(
+                pixels, img_width, img_height,
+                x1, y1, x2, y2, 1.0, stroke_color,
+            );
         }
     }
 }
@@ -329,6 +567,12 @@ fn set_pixel(pixels: &mut [u8], width: u32, x: u32, y: u32, color: &Color) {
         pixels[idx + 2] = color.b;
         pixels[idx + 3] = color.a;
     }
+}
+
+/// アルファブレンド: 背景チャンネルと前景チャンネルをアルファ値で合成
+#[inline]
+fn blend_channel(bg: u8, fg: u8, alpha: f32) -> u8 {
+    (bg as f32 * (1.0 - alpha) + fg as f32 * alpha) as u8
 }
 
 /// グラデーション矩形をピクセルバッファに描画

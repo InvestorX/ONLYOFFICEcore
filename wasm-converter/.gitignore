@@ -4,7 +4,9 @@ www/pkg/
 *.wasm
 
 # フォントファイル（サイズが大きいためgitに含めない）
+# ただしNotoSansJP-Regular.ttf は内蔵フォント（サブセット版、約130KB）として含める
 fonts/*.ttf
+!fonts/NotoSansJP-Regular.ttf
 fonts/*.otf
 fonts/*.woff
 fonts/*.woff2

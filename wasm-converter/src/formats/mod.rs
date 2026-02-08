@@ -13,6 +13,9 @@ pub mod pptx_layout;
 pub mod chart;
 pub mod smartart;
 pub mod common_stubs;
+pub mod odt;
+pub mod epub;
+pub mod odp;
 
 use crate::converter::{ConvertError, Document, DocumentConverter};
 
@@ -25,13 +28,13 @@ pub fn convert_by_extension(ext: &str, data: &[u8]) -> Result<Document, ConvertE
         "docx" => docx_layout::DocxConverter::new().convert(data),
         "xlsx" | "xls" | "ods" => xlsx::XlsxConverter::new().convert(data),
         "doc" => common_stubs::StubConverter::new("DOC", &["doc"]).convert(data),
-        "odt" => common_stubs::StubConverter::new("ODT", &["odt"]).convert(data),
-        "epub" => common_stubs::StubConverter::new("EPUB", &["epub"]).convert(data),
+        "odt" => odt::OdtConverter::new().convert(data),
+        "epub" => epub::EpubConverter::new().convert(data),
         "xps" => common_stubs::StubConverter::new("XPS", &["xps"]).convert(data),
         "djvu" | "djv" => common_stubs::StubConverter::new("DjVu", &["djvu", "djv"]).convert(data),
         "ppt" => common_stubs::StubConverter::new("PPT", &["ppt"]).convert(data),
         "pptx" => pptx_layout::PptxConverter::new().convert(data),
-        "odp" => common_stubs::StubConverter::new("ODP", &["odp"]).convert(data),
+        "odp" => odp::OdpConverter::new().convert(data),
         _ => Err(ConvertError::new(
             "unknown",
             &format!("サポートされていないフォーマットです: {}", ext),
