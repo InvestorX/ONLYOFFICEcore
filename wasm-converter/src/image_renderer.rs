@@ -247,7 +247,53 @@ pub fn render_page_to_image(
                     }
                 }
             }
-            _ => {}
+            PageElement::TableBlock {
+                x: tbl_x,
+                y: tbl_y,
+                width: tbl_w,
+                table,
+            } => {
+                // Render table: draw grid lines and cell text
+                let row_height = 20.0; // Default row height in points
+                let padding = 4.0;
+                let mut cy = *tbl_y;
+
+                // Calculate column widths
+                let col_widths = if table.column_widths.is_empty() {
+                    let ncols = table.rows.first().map_or(1, |r| r.len().max(1));
+                    vec![*tbl_w / ncols as f64; ncols]
+                } else {
+                    table.column_widths.clone()
+                };
+
+                for row in &table.rows {
+                    let mut cx = *tbl_x;
+                    for (ci, cell) in row.iter().enumerate() {
+                        let cw = col_widths.get(ci).copied().unwrap_or(60.0);
+
+                        // Draw cell border
+                        render_rect_to_pixels(
+                            &mut pixels, width, height,
+                            cx * scale, cy * scale, cw * scale, row_height * scale,
+                            None,
+                            Some(&Color::rgb(128, 128, 128)),
+                            1.0,
+                        );
+
+                        // Draw cell text
+                        if !cell.text.is_empty() {
+                            render_text_to_pixels(
+                                &mut pixels, width, height,
+                                cx + padding, cy + padding,
+                                &cell.text, &cell.style, scale, font_manager,
+                            );
+                        }
+
+                        cx += cw;
+                    }
+                    cy += row_height;
+                }
+            }
         }
     }
 
