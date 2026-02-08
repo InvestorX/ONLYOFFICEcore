@@ -2689,11 +2689,8 @@ fn render_slide_page(
                     // Collect run segments for this paragraph, handling newlines
                     let mut segments: Vec<(&TextRun, &str)> = Vec::new();
                     let mut has_bullet = false;
-                    if let Some(ref bullet) = para.bullet {
-                        // Insert bullet as a pseudo-run using the first run's style
-                        if let Some(first) = para.runs.first() {
-                            segments.push((first, ""));
-                            let _ = bullet; // bullet handled below
+                    if para.bullet.is_some() {
+                        if para.runs.first().is_some() {
                             has_bullet = true;
                         }
                     }
