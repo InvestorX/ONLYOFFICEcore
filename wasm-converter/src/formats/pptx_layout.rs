@@ -6,7 +6,7 @@
 
 use crate::converter::{
     Color, ConvertError, Document, DocumentConverter, FontStyle, GradientStop, GradientType,
-    Metadata, Page, PageElement, TextAlign,
+    Metadata, Page, PageElement, PathCommand, TextAlign,
 };
 
 /// EMU (English Metric Unit) → ポイント変換定数
@@ -226,6 +226,8 @@ struct SlideShape {
     shadow: Option<ShadowEffect>,
     has_3d: bool,
     preset_geometry: Option<String>,
+    custom_path: Option<Vec<crate::converter::PathCommand>>,
+    custom_path_viewport: Option<(f64, f64)>,
 }
 
 /// シャドウ効果
@@ -734,6 +736,14 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
     let mut cur_has_3d = false;
     let mut cur_preset_geom: Option<String> = None;
 
+    // Custom geometry state
+    let mut in_cust_geom = false;
+    let mut in_path_lst = false;
+    let mut cust_path_cmds: Vec<PathCommand> = Vec::new();
+    let mut cust_path_w: f64 = 21600.0;
+    let mut cust_path_h: f64 = 21600.0;
+    let mut cust_geom_pts: Vec<(f64, f64)> = Vec::new();
+
     macro_rules! reset_shape_state {
         () => {
             cur_x = 0.0;
@@ -777,6 +787,12 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
             shdw_dir = 0.0;
             cur_has_3d = false;
             cur_preset_geom = None;
+            in_cust_geom = false;
+            in_path_lst = false;
+            cust_path_cmds.clear();
+            cust_path_w = 21600.0;
+            cust_path_h = 21600.0;
+            cust_geom_pts.clear();
         };
     }
 
@@ -908,6 +924,41 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                                 );
                             }
                         }
+                    }
+                    // Custom geometry
+                    b"custGeom" if in_sp_pr => {
+                        in_cust_geom = true;
+                        cust_path_cmds.clear();
+                    }
+                    b"path" if in_cust_geom => {
+                        in_path_lst = true;
+                        for attr in e.attributes().filter_map(|a| a.ok()) {
+                            match attr.key.local_name().as_ref() {
+                                b"w" => {
+                                    if let Ok(v) = String::from_utf8_lossy(&attr.value).parse::<f64>() {
+                                        cust_path_w = v;
+                                    }
+                                }
+                                b"h" => {
+                                    if let Ok(v) = String::from_utf8_lossy(&attr.value).parse::<f64>() {
+                                        cust_path_h = v;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    b"moveTo" if in_path_lst => {
+                        cust_geom_pts.clear();
+                    }
+                    b"lnTo" if in_path_lst => {
+                        cust_geom_pts.clear();
+                    }
+                    b"cubicBezTo" if in_path_lst => {
+                        cust_geom_pts.clear();
+                    }
+                    b"quadBezTo" if in_path_lst => {
+                        cust_geom_pts.clear();
                     }
                     b"pPr" if (in_sp || in_pic) && !in_sp_pr => {
                         // Paragraph properties
@@ -1161,6 +1212,33 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                         }
                     }
                 }
+
+                // Custom geometry: collect points
+                if local == b"pt" && in_path_lst {
+                    let mut px = 0.0f64;
+                    let mut py = 0.0f64;
+                    for attr in e.attributes().filter_map(|a| a.ok()) {
+                        match attr.key.local_name().as_ref() {
+                            b"x" => {
+                                if let Ok(v) = String::from_utf8_lossy(&attr.value).parse::<f64>() {
+                                    px = v;
+                                }
+                            }
+                            b"y" => {
+                                if let Ok(v) = String::from_utf8_lossy(&attr.value).parse::<f64>() {
+                                    py = v;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    cust_geom_pts.push((px, py));
+                }
+
+                // Custom geometry: <a:close/> is an empty element
+                if local == b"close" && in_path_lst {
+                    cust_path_cmds.push(PathCommand::Close);
+                }
             }
 
             Ok(quick_xml::events::Event::End(ref e)) => {
@@ -1207,6 +1285,8 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             shadow: cur_shadow.clone(),
                             has_3d: cur_has_3d,
                             preset_geometry: cur_preset_geom.clone(),
+                            custom_path: if cust_path_cmds.is_empty() { None } else { Some(cust_path_cmds.clone()) },
+                            custom_path_viewport: if cust_path_cmds.is_empty() { None } else { Some((cust_path_w, cust_path_h)) },
                         });
                         in_sp = false;
                     }
@@ -1230,6 +1310,8 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             shadow: cur_shadow.clone(),
                             has_3d: cur_has_3d,
                             preset_geometry: cur_preset_geom.clone(),
+                            custom_path: None,
+                            custom_path_viewport: None,
                         });
                         in_pic = false;
                     }
@@ -1246,6 +1328,8 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             shadow: None,
                             has_3d: false,
                             preset_geometry: None,
+                            custom_path: None,
+                            custom_path_viewport: None,
                         });
                         in_cxn = false;
                     }
@@ -1256,6 +1340,41 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                     }
                     b"spPr" => {
                         in_sp_pr = false;
+                    }
+                    // Custom geometry path command end elements
+                    b"moveTo" if in_path_lst => {
+                        if let Some(&(px, py)) = cust_geom_pts.first() {
+                            cust_path_cmds.push(PathCommand::MoveTo(px, py));
+                        }
+                    }
+                    b"lnTo" if in_path_lst => {
+                        if let Some(&(px, py)) = cust_geom_pts.first() {
+                            cust_path_cmds.push(PathCommand::LineTo(px, py));
+                        }
+                    }
+                    b"cubicBezTo" if in_path_lst => {
+                        if cust_geom_pts.len() >= 3 {
+                            cust_path_cmds.push(PathCommand::CubicTo(
+                                cust_geom_pts[0].0, cust_geom_pts[0].1,
+                                cust_geom_pts[1].0, cust_geom_pts[1].1,
+                                cust_geom_pts[2].0, cust_geom_pts[2].1,
+                            ));
+                        }
+                    }
+                    b"quadBezTo" if in_path_lst => {
+                        if cust_geom_pts.len() >= 2 {
+                            cust_path_cmds.push(PathCommand::QuadTo(
+                                cust_geom_pts[0].0, cust_geom_pts[0].1,
+                                cust_geom_pts[1].0, cust_geom_pts[1].1,
+                            ));
+                        }
+                    }
+                    b"path" if in_cust_geom => {
+                        in_path_lst = false;
+                    }
+                    b"custGeom" => {
+                        in_cust_geom = false;
+                        in_path_lst = false;
                     }
                     b"xfrm" => {
                         in_xfrm = false;
@@ -1924,6 +2043,48 @@ fn render_slide_page(
 
                 // Shape fill - use preset geometry for rendering
                 let mut shape_rendered = false;
+
+                // Try custom geometry path rendering first
+                if let (Some(ref cmds), Some((vp_w, vp_h))) = (&shape.custom_path, shape.custom_path_viewport) {
+                    if !cmds.is_empty() && vp_w > 0.0 && vp_h > 0.0 {
+                        let scale_x = shape.width / vp_w;
+                        let scale_y = shape.height / vp_h;
+                        let scaled_cmds: Vec<PathCommand> = cmds.iter().map(|cmd| {
+                            match cmd {
+                                PathCommand::MoveTo(x, y) => PathCommand::MoveTo(shape.x + x * scale_x, shape.y + y * scale_y),
+                                PathCommand::LineTo(x, y) => PathCommand::LineTo(shape.x + x * scale_x, shape.y + y * scale_y),
+                                PathCommand::QuadTo(cx, cy, x, y) => PathCommand::QuadTo(
+                                    shape.x + cx * scale_x, shape.y + cy * scale_y,
+                                    shape.x + x * scale_x, shape.y + y * scale_y,
+                                ),
+                                PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => PathCommand::CubicTo(
+                                    shape.x + cx1 * scale_x, shape.y + cy1 * scale_y,
+                                    shape.x + cx2 * scale_x, shape.y + cy2 * scale_y,
+                                    shape.x + x * scale_x, shape.y + y * scale_y,
+                                ),
+                                PathCommand::ArcTo(rx, ry, rot, large, sweep, x, y) => PathCommand::ArcTo(
+                                    rx * scale_x, ry * scale_y, *rot, *large, *sweep,
+                                    shape.x + x * scale_x, shape.y + y * scale_y,
+                                ),
+                                PathCommand::Close => PathCommand::Close,
+                            }
+                        }).collect();
+
+                        let fill_color = match &shape.fill {
+                            Some(ShapeFill::Solid(c)) => Some(*c),
+                            _ => None,
+                        };
+                        let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                        page.elements.push(PageElement::Path {
+                            commands: scaled_cmds,
+                            fill: fill_color,
+                            stroke: stroke_color,
+                            stroke_width: stroke_w,
+                        });
+                        shape_rendered = true;
+                    }
+                }
+
                 // Try path-based rendering for non-trivial geometries
                 if let Some(ref geom_name) = shape.preset_geometry {
                     if geom_name != "rect" && geom_name != "ellipse" {
