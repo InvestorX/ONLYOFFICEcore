@@ -122,6 +122,11 @@ const result = convertDocument('report.txt', textData, 'pdf');
 コンパイル後のWASMバイナリに対して、実行時に外部フォントを読み込むことができます。
 これにより、ドキュメント内で参照されているフォントに近い描画が可能になります。
 
+**フォントの読み込みは、PDFとPNG画像の両方で正確な文字描画を実現するために重要です。**
+フォントが読み込まれていない場合、PDF出力ではラテン文字のみ（Helveticaフォールバック）が表示され、
+PNG画像出力では簡易矩形描画にフォールバックします。日本語・中国語・韓国語（CJK）テキストの
+正確な表示には、対応フォント（例: Noto Sans JP）の読み込みが必要です。
+
 ```javascript
 const converter = new WasmConverter();
 
@@ -161,8 +166,8 @@ converter.removeFont('NotoSansJP');
 | モジュール | 説明 |
 |:---|:---|
 | `converter.rs` | コアトレイト・型定義（Document, Page, PageElement, GradientRect, Ellipse等） |
-| `pdf_writer.rs` | 軽量PDF生成エンジン（外部依存なし、Unicode対応、グラデーション、ベジェ楕円） |
-| `image_renderer.rs` | ページ画像化（JPEG/PNGデコード、グラデーション描画、楕円描画） + ZIPバンドル |
+| `pdf_writer.rs` | 軽量PDF生成エンジン（外部依存なし、Unicode対応、グラデーション、ベジェ楕円、Helveticaフォールバック） |
+| `image_renderer.rs` | ページ画像化（ab_glyphフォントラスタライズ、JPEG/PNGデコード、グラデーション描画、楕円描画） + ZIPバンドル |
 | `font_manager.rs` | フォント管理（内蔵フォント + 実行時外部フォント読み込み、CJKフォント名自動解決） |
 | `formats/pptx_layout.rs` | PPTXコンバーター（シェイプ/塗り/グラデーション/テーマ/グループ/シャドウ/3D/チャート/SmartArt） |
 | `formats/docx_layout.rs` | DOCXコンバーター（段落/ラン書式/テーブル/画像/自動ページ分割） |

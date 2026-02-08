@@ -5,6 +5,7 @@
 
 use crate::converter::{Color, Document, FontStyle, Page, PageElement};
 use crate::font_manager::FontManager;
+use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 
 /// 画像レンダリングの設定
 pub struct ImageRenderConfig {
@@ -36,7 +37,7 @@ pub enum ImageFormat {
 pub fn render_page_to_image(
     page: &Page,
     config: &ImageRenderConfig,
-    _font_manager: &FontManager,
+    font_manager: &FontManager,
 ) -> Vec<u8> {
     let scale = config.dpi / 72.0;
     let width = (page.width * scale) as u32;
@@ -64,6 +65,7 @@ pub fn render_page_to_image(
             } => {
                 render_text_to_pixels(
                     &mut pixels, width, height, *x, *y, text, style, scale,
+                    font_manager,
                 );
             }
             PageElement::Rect {
@@ -179,10 +181,8 @@ pub fn render_page_to_image(
 }
 
 /// テキストをピクセルバッファに描画
-/// 注意: これは簡易実装であり、実際のグリフラスタライズではなく
-/// 各文字を矩形ブロックとして描画します。完全な実装では
-/// ab_glyph等のフォントラスタライザーを使用して
-/// 正確なグリフ形状をレンダリングする必要があります。
+/// ab_glyphフォントラスタライザーを使用して正確なグリフ形状をレンダリングします。
+/// フォントが利用できない場合は簡易矩形フォールバックを使用します。
 fn render_text_to_pixels(
     pixels: &mut [u8],
     img_width: u32,
@@ -192,24 +192,119 @@ fn render_text_to_pixels(
     text: &str,
     style: &FontStyle,
     scale: f64,
+    font_manager: &FontManager,
 ) {
-    // 簡易テキスト描画: 各文字を小さなドットパターンで表現
+    let font_size_px = (style.font_size * scale) as f32;
+    if font_size_px <= 0.0 || text.is_empty() {
+        return;
+    }
+
+    // Try to get font data and render with ab_glyph
+    let font_data = font_manager.resolve_font(&style.font_name)
+        .or_else(|| font_manager.best_font_data());
+
+    if let Some(data) = font_data {
+        if let Ok(font) = FontRef::try_from_slice(data) {
+            render_text_with_font(
+                pixels, img_width, img_height, x, y, text, style, scale, &font,
+            );
+            return;
+        }
+    }
+
+    // Fallback: simple rectangle rendering when no font available
+    render_text_fallback(pixels, img_width, img_height, x, y, text, style, scale);
+}
+
+/// ab_glyphフォントを使用してテキストをレンダリング
+fn render_text_with_font(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    x: f64,
+    y: f64,
+    text: &str,
+    style: &FontStyle,
+    scale: f64,
+    font: &FontRef,
+) {
+    let font_size_px = (style.font_size * scale) as f32;
+    let px_scale = PxScale::from(font_size_px);
+    let scaled_font = font.as_scaled(px_scale);
+
+    let ascent = scaled_font.ascent();
+    let start_x = (x * scale) as f32;
+    let start_y = (y * scale) as f32 + ascent;
+
+    let mut cursor_x = start_x;
+
+    for ch in text.chars() {
+        let glyph_id = font.glyph_id(ch);
+        let advance = scaled_font.h_advance(glyph_id);
+
+        if !ch.is_whitespace() {
+            let glyph = glyph_id.with_scale_and_position(
+                px_scale,
+                ab_glyph::point(cursor_x, start_y),
+            );
+
+            if let Some(outlined) = font.outline_glyph(glyph) {
+                let bounds = outlined.px_bounds();
+                outlined.draw(|gx, gy, coverage| {
+                    if coverage > 0.01 {
+                        let px = (bounds.min.x as i32 + gx as i32) as u32;
+                        let py = (bounds.min.y as i32 + gy as i32) as u32;
+                        if px < img_width && py < img_height {
+                            let idx = ((py * img_width + px) * 4) as usize;
+                            if idx + 3 < pixels.len() {
+                                let alpha = coverage.min(1.0);
+                                let inv_alpha = 1.0 - alpha;
+                                pixels[idx] = (pixels[idx] as f32 * inv_alpha
+                                    + style.color.r as f32 * alpha)
+                                    as u8;
+                                pixels[idx + 1] = (pixels[idx + 1] as f32 * inv_alpha
+                                    + style.color.g as f32 * alpha)
+                                    as u8;
+                                pixels[idx + 2] = (pixels[idx + 2] as f32 * inv_alpha
+                                    + style.color.b as f32 * alpha)
+                                    as u8;
+                                pixels[idx + 3] = 255;
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        cursor_x += advance;
+    }
+}
+
+/// フォントが利用できない場合の簡易テキスト描画フォールバック
+fn render_text_fallback(
+    pixels: &mut [u8],
+    img_width: u32,
+    img_height: u32,
+    x: f64,
+    y: f64,
+    text: &str,
+    style: &FontStyle,
+    scale: f64,
+) {
     let px = (x * scale) as i32;
     let py = (y * scale) as i32;
     let font_px = (style.font_size * scale) as i32;
-    let char_width = font_px * 6 / 10; // 半角文字幅
+    let char_width = font_px * 6 / 10;
 
-    for (i, ch) in text.chars().enumerate() {
+    let mut cursor_x = px;
+    for ch in text.chars() {
         let cw = if ch.is_ascii() { char_width } else { font_px };
-        let cx = px + i as i32 * char_width.max(1);
-        let cy = py;
 
-        // 文字領域をフォント色で塗りつぶし（簡易表現）
         if !ch.is_whitespace() {
             for dy in 2..font_px.saturating_sub(2) {
                 for dx in 1..cw.saturating_sub(1) {
-                    let pixel_x = (cx + dx) as u32;
-                    let pixel_y = (cy + dy) as u32;
+                    let pixel_x = (cursor_x + dx) as u32;
+                    let pixel_y = (py + dy) as u32;
                     if pixel_x < img_width && pixel_y < img_height {
                         let idx = ((pixel_y * img_width + pixel_x) * 4) as usize;
                         if idx + 3 < pixels.len() {
@@ -222,6 +317,8 @@ fn render_text_to_pixels(
                 }
             }
         }
+
+        cursor_x += cw;
     }
 }
 
