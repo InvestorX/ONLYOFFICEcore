@@ -1250,7 +1250,7 @@ fn decode_jpeg_to_raw_rgb(data: &[u8]) -> Option<(u32, u32, Vec<u8>, Option<Vec<
             rgb_data
         }
         _ => {
-            // Unsupported pixel format: try to convert as grayscale
+            // Unsupported pixel format: fallback, treat bytes as grayscale
             let mut rgb_data = Vec::with_capacity(pixels.len() * 3);
             for &g in &pixels {
                 rgb_data.push(g);

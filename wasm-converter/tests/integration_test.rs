@@ -1203,7 +1203,7 @@ fn test_sample12_deep_diagnosis() {
                 PageElement::Image { data, mime_type, .. } => {
                     img_count += 1;
                     let is_png = data.len() >= 4 && data[0..4] == [0x89, 0x50, 0x4E, 0x47];
-                    let is_jpeg = data.len() >= 3 && data[0..2] == [0xFF, 0xD8];
+                    let is_jpeg = data.len() >= 2 && data[0..2] == [0xFF, 0xD8];
                     eprintln!("  Slide {}: Image {} bytes, mime={}, png={}, jpeg={}", 
                         i+1, data.len(), mime_type, is_png, is_jpeg);
                 }
