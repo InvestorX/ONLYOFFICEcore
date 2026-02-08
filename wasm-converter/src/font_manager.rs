@@ -6,17 +6,12 @@
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 
-/// 内蔵フォント：Noto Sans JP Regular
+/// 内蔵フォント：Noto Sans JP Regular（サブセット版）
+/// ASCII + Latin-1 + ひらがな + カタカナ + 基本漢字（約500字）を含む
 /// ビルド時にfonts/ディレクトリからフォントファイルを読み込みます。
-/// フォントが存在しない場合はフォールバック用の空バイト列を使用します。
-#[cfg(feature = "embed-fonts")]
 const NOTO_SANS_JP_REGULAR: &[u8] = include_bytes!("../fonts/NotoSansJP-Regular.ttf");
 
-/// フォントが内蔵されていない場合のフォールバック
-#[cfg(not(feature = "embed-fonts"))]
-const NOTO_SANS_JP_REGULAR: &[u8] = &[];
-
-/// 内蔵フォント：LINE Seed JP Regular
+/// 内蔵フォント：LINE Seed JP Regular（オプション）
 #[cfg(feature = "embed-fonts")]
 const LINE_SEED_JP_REGULAR: &[u8] = include_bytes!("../fonts/LINESeedJP-Regular.ttf");
 
@@ -143,19 +138,19 @@ impl FontManager {
     }
 
     /// ドキュメント内のフォント名を利用可能なフォントに解決
-    /// フォント名が直接見つからない場合、CJKフォントへのフォールバックを試みます。
-    /// 西洋フォント（Calibri, Arial等）で一致するフォントがない場合はNoneを返します。
+    /// フォント名が直接見つからない場合、利用可能な最適フォントにフォールバックします。
     pub fn resolve_font(&self, name: &str) -> Option<&[u8]> {
         // まず名前でそのまま検索
         if let Some(data) = self.get_font_data(name) {
             return Some(data);
         }
-        // CJKフォント名かチェックし、利用可能なフォントにフォールバック
+        // CJKフォント名の場合は即フォールバック
         if is_cjk_font_name(name) {
             return self.best_font_data();
         }
-        // 西洋フォントの場合はNone（不適切なフォント置換を避ける）
-        None
+        // 西洋フォント（Calibri, Arial等）でもフォントデータがあればフォールバック
+        // （文字が全く表示されないよりも代替フォントで表示する方が望ましい）
+        self.best_font_data()
     }
 
     /// フォント名のリストを取得
