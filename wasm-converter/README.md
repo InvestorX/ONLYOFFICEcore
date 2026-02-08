@@ -2,6 +2,24 @@
 
 Rust + WebAssembly で構築されたドキュメント変換ツールです。ブラウザ上で各種ドキュメントフォーマットをPDFや画像（ZIP）に変換できます。
 
+## ⚠️ よくある質問（FAQ）
+
+### Q: `www/pkg/wasm_document_converter.js` が見つかりません
+
+**A:** このファイルは **Rust側でビルド時に自動生成されます**。
+
+以下のコマンドを実行してビルドしてください：
+
+```bash
+# Linux / macOS
+./build.sh build
+
+# Windows
+build.bat build
+```
+
+詳細は [ビルド方法](#ビルド方法) セクションをご覧ください。
+
 ## 対応フォーマット
 
 | フォーマット | 拡張子 | 状態 |
@@ -41,6 +59,18 @@ bash download_fonts.sh
 ```
 
 ## ビルド方法
+
+### ⚠️ 重要: ビルド前の注意事項
+
+**`www/pkg/wasm_document_converter.js` ファイルが見つからない場合:**
+
+このファイルは **Rust側でビルド時に自動生成されます**。リポジトリには含まれていません（`.gitignore`で除外）。
+
+以下のビルドコマンドを実行すると、`www/pkg/` ディレクトリに自動的に生成されます：
+- `wasm_document_converter.js` — JavaScriptバインディング
+- `wasm_document_converter_bg.wasm` — WebAssemblyバイナリ
+- `wasm_document_converter.d.ts` — TypeScript型定義
+- `package.json` — npm パッケージ情報
 
 ### 前提条件
 
