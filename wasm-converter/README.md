@@ -85,7 +85,15 @@ cargo install wasm-pack
 rustup target add wasm32-unknown-unknown
 ```
 
-### ビルド
+### ビルド方法（選択してください）
+
+以下のいずれかの方法でビルドできます：
+- **方法1: 自動スクリプトを使用**（推奨・簡単）
+- **方法2: 手動で1ステップずつ実行**（詳細を理解したい場合）
+
+---
+
+### 方法1: 自動スクリプトを使用（推奨）
 
 #### Linux / macOS
 
@@ -119,31 +127,241 @@ REM または直接cargoコマンド:
 cargo test --lib
 ```
 
-### フォント埋め込みビルド
+---
 
-日本語フォントをWASMバイナリに内蔵する場合：
+### 方法2: 手動で1ステップずつ実行
 
-#### Linux / macOS
+自動スクリプトを使わず、各ステップを個別に実行したい場合は以下の手順に従ってください。
+
+#### ステップ1: 前提条件の確認
+
+まず、必要なツールがインストールされているか確認します。
 
 ```bash
-# フォントをダウンロード
-./build.sh fonts
+# Rustのバージョン確認
+rustc --version
+# 出力例: rustc 1.70.0 (...)
 
-# フォント埋め込みビルド
-wasm-pack build --target web --release --out-dir www/pkg -- --features embed-fonts
+# Cargoの確認
+cargo --version
+# 出力例: cargo 1.70.0 (...)
+
+# wasm-packの確認
+wasm-pack --version
+# 出力例: wasm-pack 0.12.0
+
+# wasm-packがインストールされていない場合
+cargo install wasm-pack
 ```
 
-#### Windows
+#### ステップ2: WASMターゲットの追加
+
+Rustコンパイラにwasm32ターゲットを追加します（初回のみ）。
+
+```bash
+# wasm32-unknown-unknownターゲットの追加
+rustup target add wasm32-unknown-unknown
+
+# インストール済みターゲットの確認
+rustup target list --installed
+# wasm32-unknown-unknown が含まれていることを確認
+```
+
+#### ステップ3: 日本語フォントのダウンロード（オプション）
+
+外部フォントを埋め込む場合、事前にダウンロードします。
+
+**Linux / macOS:**
+
+```bash
+# fontsディレクトリを作成
+mkdir -p fonts
+
+# Noto Sans JP フォントをダウンロード
+curl -L -o fonts/NotoSansJP-Regular.ttf \
+  "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf"
+
+# ダウンロード確認
+ls -lh fonts/NotoSansJP-Regular.ttf
+```
+
+**Windows (PowerShell):**
+
+```powershell
+# fontsディレクトリを作成
+New-Item -ItemType Directory -Force -Path fonts
+
+# Noto Sans JP フォントをダウンロード
+Invoke-WebRequest -Uri "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf" `
+  -OutFile "fonts\NotoSansJP-Regular.ttf"
+
+# ダウンロード確認
+Get-Item fonts\NotoSansJP-Regular.ttf
+```
+
+**Windows (curl):**
 
 ```cmd
-REM フォントをダウンロード
-build.bat fonts
+REM fontsディレクトリを作成
+mkdir fonts
 
-REM フォント埋め込みビルド
+REM Noto Sans JP フォントをダウンロード
+curl -L -o fonts\NotoSansJP-Regular.ttf ^
+  "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf"
+
+REM ダウンロード確認
+dir fonts\NotoSansJP-Regular.ttf
+```
+
+**注意:** フォントダウンロードは任意です。フォントをダウンロードしない場合でも、デフォルトで内蔵フォント（Noto Sans JP サブセット版）が使用されます。
+
+#### ステップ4: WASMビルドの実行
+
+wasm-packを使ってWebAssemblyバイナリをビルドします。
+
+**リリースビルド（本番用・最適化あり）:**
+
+```bash
+# wasm-converterディレクトリで実行
+wasm-pack build --target web --release --out-dir www/pkg
+```
+
+**デバッグビルド（開発用・最適化なし）:**
+
+```bash
+# デバッグ情報付きでビルド
+wasm-pack build --target web --dev --out-dir www/pkg
+```
+
+**フォント埋め込みビルド（外部フォントを含める場合）:**
+
+```bash
+# embed-fonts フィーチャーを有効化してビルド
 wasm-pack build --target web --release --out-dir www/pkg -- --features embed-fonts
 ```
 
-### ローカルサーバーで動作確認
+ビルドが成功すると、`www/pkg/` ディレクトリに以下のファイルが生成されます：
+- `wasm_document_converter.js` — JavaScriptバインディング
+- `wasm_document_converter_bg.wasm` — WebAssemblyバイナリ
+- `wasm_document_converter.d.ts` — TypeScript型定義
+- `package.json` — npmパッケージ情報
+
+#### ステップ5: ビルド結果の確認
+
+生成されたファイルが正しく出力されているか確認します。
+
+```bash
+# 出力ファイルの確認
+ls -lh www/pkg/
+
+# 主要ファイルの存在確認
+ls www/pkg/wasm_document_converter.js
+ls www/pkg/wasm_document_converter_bg.wasm
+```
+
+**Windows:**
+
+```cmd
+REM 出力ファイルの確認
+dir www\pkg\
+
+REM 主要ファイルの存在確認
+dir www\pkg\wasm_document_converter.js
+dir www\pkg\wasm_document_converter_bg.wasm
+```
+
+#### ステップ6: テストの実行（オプション）
+
+Rustのユニットテストと統合テストを実行して、コードが正しく動作するか確認します。
+
+```bash
+# wasm-converterディレクトリで実行
+cargo test --lib
+
+# すべてのテストを実行（ネイティブ環境で実行）
+cargo test
+
+# 詳細な出力を表示
+cargo test --lib -- --nocapture
+```
+
+テストが成功すると、以下のような出力が表示されます：
+```
+running 77 tests
+...
+test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+#### ステップ7: ローカルサーバーで動作確認
+
+ビルドしたWASMを実際にブラウザで動かして確認します。
+
+**Linux / macOS:**
+
+```bash
+# wwwディレクトリに移動
+cd www
+
+# Python 3でHTTPサーバーを起動
+python3 -m http.server 8080
+
+# または Python 2の場合
+python -m SimpleHTTPServer 8080
+```
+
+**Windows:**
+
+```cmd
+REM wwwディレクトリに移動
+cd www
+
+REM PythonでHTTPサーバーを起動
+python -m http.server 8080
+```
+
+ブラウザで `http://localhost:8080` にアクセスして、ドキュメント変換機能をテストできます。
+
+#### ステップ8: ビルドのクリーンアップ（必要に応じて）
+
+ビルド成果物を削除して、クリーンな状態に戻すことができます。
+
+```bash
+# 生成されたWASMファイルを削除
+rm -rf www/pkg/
+
+# Cargoのビルドキャッシュも削除する場合
+cargo clean
+```
+
+**Windows:**
+
+```cmd
+REM 生成されたWASMファイルを削除
+rmdir /s /q www\pkg
+
+REM Cargoのビルドキャッシュも削除する場合
+cargo clean
+```
+
+---
+
+### 補足: ビルドオプション一覧
+
+| コマンド | 説明 |
+|:---|:---|
+| `wasm-pack build --target web --release` | 本番用リリースビルド（最適化あり） |
+| `wasm-pack build --target web --dev` | 開発用デバッグビルド（デバッグ情報あり） |
+| `wasm-pack build ... -- --features embed-fonts` | フォント埋め込みビルド |
+| `--out-dir www/pkg` | 出力先ディレクトリを指定 |
+| `cargo test --lib` | ユニットテストのみ実行 |
+| `cargo test` | すべてのテスト実行 |
+| `cargo clean` | ビルドキャッシュをクリア |
+
+---
+
+### スクリプトでのローカルサーバー起動
+
+ビルド後、自動スクリプトを使ってローカルサーバーを起動することもできます。
 
 #### Linux / macOS
 
