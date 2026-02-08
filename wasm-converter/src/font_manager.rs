@@ -144,6 +144,7 @@ impl FontManager {
 
     /// ドキュメント内のフォント名を利用可能なフォントに解決
     /// フォント名が直接見つからない場合、CJKフォントへのフォールバックを試みます。
+    /// 西洋フォント（Calibri, Arial等）で一致するフォントがない場合はNoneを返します。
     pub fn resolve_font(&self, name: &str) -> Option<&[u8]> {
         // まず名前でそのまま検索
         if let Some(data) = self.get_font_data(name) {
@@ -153,8 +154,8 @@ impl FontManager {
         if is_cjk_font_name(name) {
             return self.best_font_data();
         }
-        // 一般的なフォント（Calibri, Arial, Times等）もベストフォントで描画
-        self.best_font_data()
+        // 西洋フォントの場合はNone（不適切なフォント置換を避ける）
+        None
     }
 
     /// フォント名のリストを取得
@@ -183,6 +184,8 @@ fn is_cjk_font_name(name: &str) -> bool {
         }
     }
     // 日本語文字が含まれているかチェック
+    // U+3000-9FFF: CJK統合漢字、ひらがな、カタカナ、句読点
+    // U+FF00-FFEF: 半角・全角形
     name.chars().any(|c| {
         ('\u{3000}'..='\u{9FFF}').contains(&c) || ('\u{FF00}'..='\u{FFEF}').contains(&c)
     })
