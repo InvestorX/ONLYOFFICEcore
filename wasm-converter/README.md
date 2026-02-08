@@ -11,14 +11,14 @@ Rust + WebAssembly で構築されたドキュメント変換ツールです。�
 | RTF | .rtf | ✅ テキスト抽出 |
 | Microsoft Word | .docx | ✅ レイアウト保持（書式・テーブル・画像対応） |
 | Microsoft Word (旧) | .doc | 🔧 開発中 |
-| OpenDocument Text | .odt | 🔧 開発中 |
-| EPUB | .epub | 🔧 開発中 |
+| OpenDocument Text | .odt | ✅ テキスト抽出 |
+| EPUB | .epub | ✅ テキスト抽出 |
 | XPS | .xps | 🔧 開発中 |
 | DjVu | .djvu | 🔧 開発中 |
 | Microsoft Excel | .xlsx, .xls, .ods | ✅ テーブル表示 |
 | Microsoft PowerPoint | .pptx | ✅ レイアウト保持（シェイプ位置・書式・画像対応） |
 | Microsoft PowerPoint (旧) | .ppt | 🔧 開発中 |
-| OpenDocument Presentation | .odp | 🔧 開発中 |
+| OpenDocument Presentation | .odp | ✅ テキスト抽出 |
 
 ## 出力形式
 
@@ -168,6 +168,9 @@ converter.removeFont('NotoSansJP');
 | `formats/docx_layout.rs` | DOCXコンバーター（段落/ラン書式/テーブル/画像/自動ページ分割） |
 | `formats/chart.rs` | チャートレンダリング（棒/円/面/折れ線/散布） |
 | `formats/smartart.rs` | SmartArt/ダイアグラムレンダリング |
+| `formats/odt.rs` | ODTコンバーター（OpenDocument Text テキスト抽出・メタデータ） |
+| `formats/epub.rs` | EPUBコンバーター（OPF/spine解析・XHTML テキスト抽出） |
+| `formats/odp.rs` | ODPコンバーター（OpenDocument Presentation スライドテキスト抽出） |
 | `formats/` | その他のフォーマットコンバーター（txt, csv, rtf, xlsx） |
 | `lib.rs` | WASMエントリーポイント（wasm-bindgen API + フォント管理API） |
 

@@ -133,7 +133,7 @@ struct DocRun {
 #[derive(Debug, Clone)]
 enum RunContent {
     Text(String),
-    Image { r_id: String },
+    Image { r_id: String, width: f64, height: f64 },
     ImageData { data: Vec<u8>, mime_type: String, width: f64, height: f64 },
     LineBreak,
     Tab,
@@ -300,8 +300,8 @@ fn parse_document_body(xml: &str) -> Vec<BodyElement> {
     // Image state
     let mut in_drawing = false;
     let mut drawing_r_id = String::new();
-    let mut _drawing_cx = 0.0f64;
-    let mut _drawing_cy = 0.0f64;
+    let mut drawing_cx = 0.0f64;
+    let mut drawing_cy = 0.0f64;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -362,8 +362,8 @@ fn parse_document_body(xml: &str) -> Vec<BodyElement> {
                     b"drawing" if in_run => {
                         in_drawing = true;
                         drawing_r_id.clear();
-                        _drawing_cx = 72.0;
-                        _drawing_cy = 72.0;
+                        drawing_cx = 72.0;
+                        drawing_cy = 72.0;
                     }
                     b"tbl" if in_body => {
                         in_table = true;
@@ -589,13 +589,13 @@ fn parse_document_body(xml: &str) -> Vec<BodyElement> {
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
                                 b"cx" => {
-                                    _drawing_cx = String::from_utf8_lossy(&attr.value)
+                                    drawing_cx = String::from_utf8_lossy(&attr.value)
                                         .parse::<f64>()
                                         .unwrap_or(0.0)
                                         / 12700.0; // EMU to pt
                                 }
                                 b"cy" => {
-                                    _drawing_cy = String::from_utf8_lossy(&attr.value)
+                                    drawing_cy = String::from_utf8_lossy(&attr.value)
                                         .parse::<f64>()
                                         .unwrap_or(0.0)
                                         / 12700.0;
@@ -640,7 +640,7 @@ fn parse_document_body(xml: &str) -> Vec<BodyElement> {
                     b"drawing" => {
                         if in_drawing && !drawing_r_id.is_empty() {
                             cur_runs.push(DocRun {
-                                content: RunContent::Image { r_id: drawing_r_id.clone() },
+                                content: RunContent::Image { r_id: drawing_r_id.clone(), width: drawing_cx, height: drawing_cy },
                                 font_size: cur_font_size,
                                 bold: false,
                                 italic: false,
@@ -734,7 +734,7 @@ fn resolve_images(
                     .runs
                     .iter()
                     .map(|run| {
-                        if let RunContent::Image { r_id } = &run.content {
+                        if let RunContent::Image { r_id, width: img_w, height: img_h } = &run.content {
                             if let Some(ref rels_xml) = rels {
                                 if let Some(target) = resolve_rel(rels_xml, r_id) {
                                     let img_path = format!("word/{}", target);
@@ -748,8 +748,8 @@ fn resolve_images(
                                             content: RunContent::ImageData {
                                                 data,
                                                 mime_type: mime.to_string(),
-                                                width: 200.0, // Default size; TODO: use parsed EMU dimensions
-                                                height: 150.0,
+                                                width: *img_w,
+                                                height: *img_h,
                                             },
                                             ..run.clone()
                                         };
