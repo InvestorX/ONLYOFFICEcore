@@ -16,7 +16,7 @@ Rust + WebAssembly で構築されたドキュメント変換ツールです。�
 | XPS | .xps | 🔧 開発中 |
 | DjVu | .djvu | 🔧 開発中 |
 | Microsoft Excel | .xlsx, .xls, .ods | ✅ テーブル表示 |
-| Microsoft PowerPoint | .pptx | ✅ レイアウト保持（シェイプ位置・書式・画像対応） |
+| Microsoft PowerPoint | .pptx | ✅ レイアウト保持（シェイプ位置・書式・画像・86種類のプリセットジオメトリ・カスタムジオメトリ対応） |
 | Microsoft PowerPoint (旧) | .ppt | 🔧 開発中 |
 | OpenDocument Presentation | .odp | ✅ テキスト抽出 |
 
@@ -176,7 +176,7 @@ converter.removeFont('NotoSansJP');
 | `pdf_writer.rs` | 軽量PDF生成エンジン（Unicode対応、グラデーション、ベジェ楕円、パス描画、Helveticaフォールバック） |
 | `image_renderer.rs` | ページ画像化（ab_glyphフォントラスタライズ、パススキャンライン塗りつぶし、JPEG/PNGデコード、グラデーション・楕円描画） + ZIPバンドル |
 | `font_manager.rs` | フォント管理（NotoSansJP内蔵 + 実行時外部フォント読み込み、CJKフォント名自動解決） |
-| `formats/pptx_layout.rs` | PPTXコンバーター（シェイプ/塗り/グラデーション/テーマ/グループ/シャドウ/3D/チャート/SmartArt/プリセットジオメトリ/カスタムジオメトリ） |
+| `formats/pptx_layout.rs` | PPTXコンバーター（シェイプ/塗り/グラデーション/テーマ/グループ/シャドウ/3D/チャート/SmartArt/**86種類のプリセットジオメトリ**/カスタムジオメトリ） |
 | `formats/docx_layout.rs` | DOCXコンバーター（段落/ラン書式/テーブル/画像/自動ページ分割） |
 | `formats/chart.rs` | チャートレンダリング（棒/円/面/折れ線/散布） |
 | `formats/smartart.rs` | SmartArt/ダイアグラムレンダリング（dsp:drawing解析、テキスト抽出、グリッドレイアウト） |
@@ -185,6 +185,54 @@ converter.removeFont('NotoSansJP');
 | `formats/odp.rs` | ODPコンバーター（OpenDocument Presentation スライドテキスト抽出） |
 | `formats/` | その他のフォーマットコンバーター（txt, csv, rtf, xlsx） |
 | `lib.rs` | WASMエントリーポイント（wasm-bindgen API + フォント管理API） |
+
+## プリセットジオメトリ対応
+
+PPTX変換では**86種類**のプリセットジオメトリに対応しています。すべての図形が正確にレンダリングされます。
+
+### 基本図形
+- 三角形（triangle, isosTriangle, rtTriangle）
+- 四角形（diamond, parallelogram, trapezoid）
+- 多角形（pentagon, hexagon, octagon）
+- 星形（star4, star5, star6, star8, star10, star12, star16, star24, star32）
+
+### 矢印
+- arrow, rightArrow, leftArrow, upArrow, downArrow
+- leftRightArrow, upDownArrow, notchedRightArrow
+
+### フローチャート（17種類）
+- flowChartProcess, flowChartDecision, flowChartTerminator
+- flowChartDocument, flowChartPredefinedProcess
+- flowChartInputOutput, flowChartPreparation
+- flowChartManualInput, flowChartManualOperation
+- flowChartConnector, flowChartOffpageConnector
+- flowChartSort, flowChartExtract, flowChartMerge
+- flowChartDelay, flowChartDisplay
+- flowChartMultidocument, flowChartOnlineStorage
+- flowChartAlternateProcess, flowChartMagneticDisk
+
+### 特殊図形
+- moon（三日月）, smileyFace（スマイル）, sun（太陽）
+- noSmoking（禁煙マーク）, heart（ハート）
+- lightningBolt（稲妻）, cloud（雲）, cloudCallout
+- foldedCorner（折り目付き）, frame（額縁）, bevel（面取り）
+- gear6（歯車6）, gear9（歯車9）
+- irregularSeal1, irregularSeal2, explosion1, explosion2
+
+### その他
+- arc（弧）, pie（扇形）, donut（ドーナツ）
+- wave（波）, doubleWave（二重波）
+- ribbon（リボン）, ellipseRibbon
+- roundRect（角丸矩形）, snip1Rect（角切り矩形）
+- アクションボタン（actionButtonBlank, actionButtonHome, actionButtonHelp）
+
+### カスタムジオメトリ
+OOXML `<a:custGeom>` 要素による完全なカスタムパス定義にも対応：
+- `<a:moveTo>`, `<a:lnTo>` — 移動・直線
+- `<a:cubicBezTo>` — 3次ベジェ曲線
+- `<a:quadBezTo>` — 2次ベジェ曲線
+- `<a:close>` — パスのクローズ
+- ビューポート座標系の自動スケーリング
 
 ## ライセンス
 
