@@ -6,6 +6,14 @@
 use crate::converter::{Color, Document, FontStyle, GradientStop, GradientType, Page, PageElement, Table, TextAlign};
 use crate::font_manager::FontManager;
 
+/// ページ内の画像XObject情報
+struct PdfImageXObject {
+    name: String,       // e.g. "Im0"
+    obj_id: u32,        // PDF object ID for the image XObject
+    #[allow(dead_code)]
+    smask_id: Option<u32>, // Optional SMask object ID for alpha
+}
+
 /// PDFオブジェクト
 struct PdfObject {
     id: u32,
@@ -194,8 +202,11 @@ impl<'a> PdfWriter<'a> {
         for (i, page) in doc.pages.iter().enumerate() {
             let (page_id, content_id) = page_content_pairs[i];
 
-            // ページコンテンツストリーム
-            let content = self.render_page_content(page, has_font);
+            // ページ内の画像を収集してXObjectを作成
+            let image_xobjects = self.create_page_image_xobjects(page);
+
+            // ページコンテンツストリーム（画像参照付き）
+            let content = self.render_page_content(page, has_font, &image_xobjects);
             self.add_object(
                 content_id,
                 format!(
@@ -206,16 +217,26 @@ impl<'a> PdfWriter<'a> {
                 .into_bytes(),
             );
 
-            // ページオブジェクト（/F1: CIDフォント, /F2: Helveticaフォールバック）
+            // XObjectリソース辞書を構築
+            let xobj_dict = if image_xobjects.is_empty() {
+                String::new()
+            } else {
+                let refs: Vec<String> = image_xobjects.iter()
+                    .map(|img| format!("/{} {} 0 R", img.name, img.obj_id))
+                    .collect();
+                format!(" /XObject << {} >>", refs.join(" "))
+            };
+
+            // ページオブジェクト（/F1: CIDフォント, /F2: Helveticaフォールバック + XObject）
             self.add_object(
                 page_id,
                 format!(
                     "<< /Type /Page /Parent {} 0 R \
                      /MediaBox [0 0 {} {}] \
                      /Contents {} 0 R \
-                     /Resources << /Font << /F1 {} 0 R /F2 {} 0 R >> >> >>",
+                     /Resources << /Font << /F1 {} 0 R /F2 {} 0 R >>{} >> >>",
                     pages_id, page.width, page.height, content_id, font_id,
-                    fallback_font_id
+                    fallback_font_id, xobj_dict
                 )
                 .into_bytes(),
             );
@@ -227,8 +248,9 @@ impl<'a> PdfWriter<'a> {
     }
 
     /// ページコンテンツのPDFストリームを生成
-    fn render_page_content(&self, page: &Page, has_font: bool) -> Vec<u8> {
+    fn render_page_content(&self, page: &Page, has_font: bool, image_xobjects: &[PdfImageXObject]) -> Vec<u8> {
         let mut stream = Vec::new();
+        let mut img_idx = 0usize; // 画像XObjectカウンター
 
         for element in &page.elements {
             match element {
@@ -316,18 +338,18 @@ impl<'a> PdfWriter<'a> {
                     height: img_h,
                     ..
                 } => {
-                    // Draw a placeholder rectangle for the image position in PDF
-                    // (Full image XObject embedding is complex; we show the bounding box)
-                    let py = page.height - img_y - img_h;
-                    stream.extend_from_slice(
-                        format!(
-                            "0.88 0.88 0.88 rg\n{} {} {} {} re\nf\n\
-                             0.7 0.7 0.7 RG\n0.5 w\n{} {} {} {} re\nS\n",
-                            img_x, py, img_w, img_h,
-                            img_x, py, img_w, img_h
-                        )
-                        .as_bytes(),
-                    );
+                    // 画像XObjectを配置
+                    if let Some(xobj) = image_xobjects.get(img_idx) {
+                        let py = page.height - img_y - img_h;
+                        stream.extend_from_slice(
+                            format!(
+                                "q\n{} 0 0 {} {} {} cm\n/{} Do\nQ\n",
+                                img_w, img_h, img_x, py, xobj.name
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                    img_idx += 1;
                 }
                 PageElement::GradientRect {
                     x,
@@ -366,21 +388,22 @@ impl<'a> PdfWriter<'a> {
                     stroke,
                     stroke_width,
                 } => {
-                    // For PDF, render image as rectangle placeholder
+                    // 楕円領域に画像XObjectを配置
                     let img_x = *cx - *rx;
                     let img_y = *cy - *ry;
                     let img_w = *rx * 2.0;
                     let img_h = *ry * 2.0;
-                    let py = page.height - img_y - img_h;
-                    stream.extend_from_slice(
-                        format!(
-                            "0.88 0.88 0.88 rg\n{} {} {} {} re\nf\n\
-                             0.7 0.7 0.7 RG\n0.5 w\n{} {} {} {} re\nS\n",
-                            img_x, py, img_w, img_h,
-                            img_x, py, img_w, img_h
-                        )
-                        .as_bytes(),
-                    );
+                    if let Some(xobj) = image_xobjects.get(img_idx) {
+                        let py = page.height - img_y - img_h;
+                        stream.extend_from_slice(
+                            format!(
+                                "q\n{} 0 0 {} {} {} cm\n/{} Do\nQ\n",
+                                img_w, img_h, img_x, py, xobj.name
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                    img_idx += 1;
                     // Draw ellipse outline if stroke is specified
                     if stroke.is_some() && *stroke_width > 0.0 {
                         self.render_ellipse(
@@ -414,7 +437,7 @@ impl<'a> PdfWriter<'a> {
                     stroke,
                     stroke_width,
                 } => {
-                    // For PDF, calculate bounding box and render as placeholder image
+                    // パスのバウンディングボックスに画像XObjectを配置
                     let mut min_x = f64::INFINITY;
                     let mut min_y = f64::INFINITY;
                     let mut max_x = f64::NEG_INFINITY;
@@ -430,21 +453,18 @@ impl<'a> PdfWriter<'a> {
                                 max_y = max_y.max(*y);
                             }
                             crate::converter::PathCommand::QuadTo(cx, cy, x, y) => {
-                                // Include both control point and end point
                                 min_x = min_x.min(*cx).min(*x);
                                 min_y = min_y.min(*cy).min(*y);
                                 max_x = max_x.max(*cx).max(*x);
                                 max_y = max_y.max(*cy).max(*y);
                             }
                             crate::converter::PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
-                                // Include both control points and end point
                                 min_x = min_x.min(*cx1).min(*cx2).min(*x);
                                 min_y = min_y.min(*cy1).min(*cy2).min(*y);
                                 max_x = max_x.max(*cx1).max(*cx2).max(*x);
                                 max_y = max_y.max(*cy1).max(*cy2).max(*y);
                             }
                             crate::converter::PathCommand::ArcTo(rx, ry, _, _, _, x, y) => {
-                                // For arcs, include end point and approximate with radii
                                 min_x = min_x.min(*x).min(*x - rx);
                                 min_y = min_y.min(*y).min(*y - ry);
                                 max_x = max_x.max(*x).max(*x + rx);
@@ -455,19 +475,20 @@ impl<'a> PdfWriter<'a> {
                     }
 
                     if min_x < max_x && min_y < max_y {
-                        let img_w = max_x - min_x;
-                        let img_h = max_y - min_y;
-                        let py = page.height - min_y - img_h;
-                        stream.extend_from_slice(
-                            format!(
-                                "0.88 0.88 0.88 rg\n{} {} {} {} re\nf\n\
-                                 0.7 0.7 0.7 RG\n0.5 w\n{} {} {} {} re\nS\n",
-                                min_x, py, img_w, img_h,
-                                min_x, py, img_w, img_h
-                            )
-                            .as_bytes(),
-                        );
+                        if let Some(xobj) = image_xobjects.get(img_idx) {
+                            let img_w = max_x - min_x;
+                            let img_h = max_y - min_y;
+                            let py = page.height - min_y - img_h;
+                            stream.extend_from_slice(
+                                format!(
+                                    "q\n{} 0 0 {} {} {} cm\n/{} Do\nQ\n",
+                                    img_w, img_h, min_x, py, xobj.name
+                                )
+                                .as_bytes(),
+                            );
+                        }
                     }
+                    img_idx += 1;
 
                     // Render the path stroke if specified
                     if stroke.is_some() && *stroke_width > 0.0 {
@@ -892,6 +913,80 @@ impl<'a> PdfWriter<'a> {
         map
     }
 
+    /// ページ内の画像要素からPDF XObjectを作成
+    fn create_page_image_xobjects(&mut self, page: &Page) -> Vec<PdfImageXObject> {
+        let mut xobjects = Vec::new();
+        let mut counter = 0u32;
+
+        for element in &page.elements {
+            let image_data: Option<(&[u8], &str)> = match element {
+                PageElement::Image { data, mime_type, .. } => Some((data, mime_type)),
+                PageElement::EllipseImage { data, mime_type, .. } => Some((data, mime_type)),
+                PageElement::PathImage { data, mime_type, .. } => Some((data, mime_type)),
+                _ => None,
+            };
+
+            if let Some((data, mime_type)) = image_data {
+                let name = format!("Im{}", counter);
+                let is_jpeg = mime_type.contains("jpeg") || mime_type.contains("jpg")
+                    || (data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8);
+
+                if is_jpeg {
+                    if let Some((w, h)) = extract_jpeg_dimensions(data) {
+                        let obj_id = self.alloc_id();
+                        let mut obj_data = format!(
+                            "<< /Type /XObject /Subtype /Image /Width {} /Height {} \
+                             /ColorSpace /DeviceRGB /BitsPerComponent 8 \
+                             /Filter /DCTDecode /Length {} >>\nstream\n",
+                            w, h, data.len()
+                        ).into_bytes();
+                        obj_data.extend_from_slice(data);
+                        obj_data.extend_from_slice(b"\nendstream");
+                        self.add_object(obj_id, obj_data);
+                        xobjects.push(PdfImageXObject { name, obj_id, smask_id: None });
+                    }
+                } else if let Some((w, h, rgb_data, alpha_data)) = decode_image_to_raw_rgb(data) {
+                    let obj_id = self.alloc_id();
+
+                    // アルファチャンネルがあればSMaskを作成
+                    let smask_id = if let Some(ref alpha) = alpha_data {
+                        let sid = self.alloc_id();
+                        let compressed_alpha = miniz_oxide::deflate::compress_to_vec(alpha, 6);
+                        let mut smask_data = format!(
+                            "<< /Type /XObject /Subtype /Image /Width {} /Height {} \
+                             /ColorSpace /DeviceGray /BitsPerComponent 8 \
+                             /Filter /FlateDecode /Length {} >>\nstream\n",
+                            w, h, compressed_alpha.len()
+                        ).into_bytes();
+                        smask_data.extend_from_slice(&compressed_alpha);
+                        smask_data.extend_from_slice(b"\nendstream");
+                        self.add_object(sid, smask_data);
+                        Some(sid)
+                    } else {
+                        None
+                    };
+
+                    let compressed_rgb = miniz_oxide::deflate::compress_to_vec(&rgb_data, 6);
+                    let smask_ref = smask_id.map_or(String::new(),
+                        |sid| format!(" /SMask {} 0 R", sid));
+                    let mut obj_data = format!(
+                        "<< /Type /XObject /Subtype /Image /Width {} /Height {} \
+                         /ColorSpace /DeviceRGB /BitsPerComponent 8 \
+                         /Filter /FlateDecode /Length {}{} >>\nstream\n",
+                        w, h, compressed_rgb.len(), smask_ref
+                    ).into_bytes();
+                    obj_data.extend_from_slice(&compressed_rgb);
+                    obj_data.extend_from_slice(b"\nendstream");
+                    self.add_object(obj_id, obj_data);
+                    xobjects.push(PdfImageXObject { name, obj_id, smask_id });
+                }
+                counter += 1;
+            }
+        }
+
+        xobjects
+    }
+
     /// PDFバイト列をシリアライズ
     fn serialize(&self, catalog_id: u32) -> Vec<u8> {
         let mut output = Vec::new();
@@ -979,4 +1074,192 @@ pub fn render_to_pdf(doc: &Document) -> Vec<u8> {
 pub fn render_to_pdf_with_fonts(doc: &Document, font_manager: &FontManager) -> Vec<u8> {
     let mut writer = PdfWriter::new(font_manager);
     writer.render(doc)
+}
+
+/// JPEGバイト列から画像の幅と高さを抽出する
+fn extract_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+
+    let mut i = 2;
+    while i + 1 < data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        i += 2;
+
+        // SOF markers (SOF0-SOF3, SOF5-SOF7, SOF9-SOF11, SOF13-SOF15)
+        if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF) {
+            if i + 7 <= data.len() {
+                let height = ((data[i + 3] as u32) << 8) | (data[i + 4] as u32);
+                let width = ((data[i + 5] as u32) << 8) | (data[i + 6] as u32);
+                if width > 0 && height > 0 {
+                    return Some((width, height));
+                }
+            }
+            return None;
+        }
+
+        // Skip non-SOF markers by reading segment length
+        if i + 1 < data.len() {
+            let seg_len = ((data[i] as usize) << 8) | (data[i + 1] as usize);
+            if seg_len < 2 {
+                return None;
+            }
+            i += seg_len;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// 画像データ（PNG/JPEG）をRGBバイト列にデコードする
+/// 戻り値: (width, height, rgb_data, optional_alpha_data)
+fn decode_image_to_raw_rgb(data: &[u8]) -> Option<(u32, u32, Vec<u8>, Option<Vec<u8>>)> {
+    // Try PNG first
+    let is_png = data.len() >= 4 && data[0..4] == [0x89, 0x50, 0x4E, 0x47];
+    if is_png {
+        return decode_png_to_raw_rgb(data);
+    }
+    // Try JPEG
+    let is_jpeg = data.len() >= 2 && data[0] == 0xFF && data[1] == 0xD8;
+    if is_jpeg {
+        return decode_jpeg_to_raw_rgb(data);
+    }
+    None
+}
+
+/// PNGデータをRGBバイト列にデコード
+fn decode_png_to_raw_rgb(data: &[u8]) -> Option<(u32, u32, Vec<u8>, Option<Vec<u8>>)> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(data));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let width = info.width;
+    let height = info.height;
+    let pixels = &buf[..info.buffer_size()];
+
+    match info.color_type {
+        png::ColorType::Rgba => {
+            let npixels = (width * height) as usize;
+            let mut rgb = Vec::with_capacity(npixels * 3);
+            let mut alpha = Vec::with_capacity(npixels);
+            let mut has_transparency = false;
+            for chunk in pixels.chunks_exact(4) {
+                rgb.push(chunk[0]);
+                rgb.push(chunk[1]);
+                rgb.push(chunk[2]);
+                alpha.push(chunk[3]);
+                if chunk[3] != 255 { has_transparency = true; }
+            }
+            let alpha_data = if has_transparency { Some(alpha) } else { None };
+            Some((width, height, rgb, alpha_data))
+        }
+        png::ColorType::Rgb => {
+            Some((width, height, pixels.to_vec(), None))
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let npixels = (width * height) as usize;
+            let mut rgb = Vec::with_capacity(npixels * 3);
+            let mut alpha = Vec::with_capacity(npixels);
+            let mut has_transparency = false;
+            for chunk in pixels.chunks_exact(2) {
+                rgb.push(chunk[0]);
+                rgb.push(chunk[0]);
+                rgb.push(chunk[0]);
+                alpha.push(chunk[1]);
+                if chunk[1] != 255 { has_transparency = true; }
+            }
+            let alpha_data = if has_transparency { Some(alpha) } else { None };
+            Some((width, height, rgb, alpha_data))
+        }
+        png::ColorType::Grayscale => {
+            let npixels = (width * height) as usize;
+            let mut rgb = Vec::with_capacity(npixels * 3);
+            for &g in pixels.iter() {
+                rgb.push(g);
+                rgb.push(g);
+                rgb.push(g);
+            }
+            Some((width, height, rgb, None))
+        }
+        png::ColorType::Indexed => {
+            // Indexed PNG: expand palette
+            let info2 = reader.info();
+            let palette = info2.palette.as_ref()?;
+            let trns = info2.trns.as_ref();
+            let npixels = (width * height) as usize;
+            let mut rgb = Vec::with_capacity(npixels * 3);
+            let mut alpha = Vec::with_capacity(npixels);
+            let mut has_transparency = false;
+            for &idx in pixels.iter().take(npixels) {
+                let base = (idx as usize) * 3;
+                if base + 2 < palette.len() {
+                    rgb.push(palette[base]);
+                    rgb.push(palette[base + 1]);
+                    rgb.push(palette[base + 2]);
+                } else {
+                    rgb.push(0);
+                    rgb.push(0);
+                    rgb.push(0);
+                }
+                let a = trns.and_then(|t| t.get(idx as usize).copied()).unwrap_or(255);
+                alpha.push(a);
+                if a != 255 { has_transparency = true; }
+            }
+            let alpha_data = if has_transparency { Some(alpha) } else { None };
+            Some((width, height, rgb, alpha_data))
+        }
+    }
+}
+
+/// JPEGデータをRGBバイト列にデコード
+fn decode_jpeg_to_raw_rgb(data: &[u8]) -> Option<(u32, u32, Vec<u8>, Option<Vec<u8>>)> {
+    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(data));
+    let pixels = decoder.decode().ok()?;
+    let info = decoder.info()?;
+    let width = info.width as u32;
+    let height = info.height as u32;
+
+    let rgb = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => pixels,
+        jpeg_decoder::PixelFormat::L8 => {
+            let mut rgb_data = Vec::with_capacity(pixels.len() * 3);
+            for &g in &pixels {
+                rgb_data.push(g);
+                rgb_data.push(g);
+                rgb_data.push(g);
+            }
+            rgb_data
+        }
+        jpeg_decoder::PixelFormat::CMYK32 => {
+            let mut rgb_data = Vec::with_capacity((pixels.len() / 4) * 3);
+            for chunk in pixels.chunks_exact(4) {
+                let c = chunk[0] as f64 / 255.0;
+                let m = chunk[1] as f64 / 255.0;
+                let y = chunk[2] as f64 / 255.0;
+                let k = chunk[3] as f64 / 255.0;
+                rgb_data.push(((1.0 - c) * (1.0 - k) * 255.0) as u8);
+                rgb_data.push(((1.0 - m) * (1.0 - k) * 255.0) as u8);
+                rgb_data.push(((1.0 - y) * (1.0 - k) * 255.0) as u8);
+            }
+            rgb_data
+        }
+        _ => {
+            // Unsupported pixel format: try to convert as grayscale
+            let mut rgb_data = Vec::with_capacity(pixels.len() * 3);
+            for &g in &pixels {
+                rgb_data.push(g);
+                rgb_data.push(g);
+                rgb_data.push(g);
+            }
+            rgb_data
+        }
+    };
+
+    Some((width, height, rgb, None))
 }

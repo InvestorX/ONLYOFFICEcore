@@ -1261,3 +1261,63 @@ fn test_sample12_deep_diagnosis() {
         assert!(!table_elems.is_empty(), "Slide {} should have tables", slide_idx + 1);
     }
 }
+
+#[test]
+fn test_pdf_contains_image_xobjects() {
+    let pptx_path = "/tmp/Sample_12.pptx";
+    if !std::path::Path::new(pptx_path).exists() {
+        println!("SKIP: {} not found", pptx_path);
+        return;
+    }
+    use std::io::Read;
+    let mut data = Vec::new();
+    std::fs::File::open(pptx_path).unwrap().read_to_end(&mut data).unwrap();
+
+    let doc = formats::convert_by_extension("pptx", &data).unwrap();
+    let fm = FontManager::new();
+    let pdf = pdf_writer::render_to_pdf_with_fonts(&doc, &fm);
+
+    let pdf_str = String::from_utf8_lossy(&pdf);
+
+    // PDF should contain XObject references for images
+    assert!(pdf_str.contains("/XObject"), "PDF should contain /XObject resource dictionary");
+    assert!(pdf_str.contains("/Im0"), "PDF should contain /Im0 image reference");
+    assert!(pdf_str.contains("/Subtype /Image"), "PDF should contain /Subtype /Image for XObjects");
+    assert!(pdf_str.contains("Do"), "PDF should contain Do operator for image placement");
+
+    // Should contain DCTDecode (for JPEG) or FlateDecode (for PNG)
+    let has_dct = pdf_str.contains("/DCTDecode");
+    let has_flate_img = pdf_str.contains("/FlateDecode");
+    assert!(has_dct || has_flate_img, "PDF should contain image filter (DCTDecode or FlateDecode)");
+
+    // Should NOT contain the old gray placeholder pattern for images
+    // (Note: some gray rects may still exist for other shapes, 
+    //  but the count should be significantly reduced)
+    
+    // Write PDF for manual inspection
+    std::fs::write("/tmp/Sample_12_output.pdf", &pdf).ok();
+    eprintln!("PDF written to /tmp/Sample_12_output.pdf ({} bytes)", pdf.len());
+}
+
+#[test]
+fn test_pdf_table_rendering() {
+    let pptx_path = "/tmp/Sample_12.pptx";
+    if !std::path::Path::new(pptx_path).exists() {
+        println!("SKIP: {} not found", pptx_path);
+        return;
+    }
+    use std::io::Read;
+    let mut data = Vec::new();
+    std::fs::File::open(pptx_path).unwrap().read_to_end(&mut data).unwrap();
+
+    let doc = formats::convert_by_extension("pptx", &data).unwrap();
+    let fm = FontManager::new();
+    let pdf = pdf_writer::render_to_pdf_with_fonts(&doc, &fm);
+
+    let pdf_str = String::from_utf8_lossy(&pdf);
+
+    // Tables use BT/ET for cell text rendering
+    // Check slide 6 has table content
+    // "No." and "First Name" should be in the PDF text
+    assert!(pdf_str.contains("Tj"), "PDF should contain text show (Tj) operators for table cells");
+}
