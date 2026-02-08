@@ -57,6 +57,8 @@ rustup target add wasm32-unknown-unknown
 
 ### ビルド
 
+#### Linux / macOS
+
 ```bash
 # リリースビルド
 ./build.sh build
@@ -71,9 +73,27 @@ rustup target add wasm32-unknown-unknown
 cargo test --lib
 ```
 
+#### Windows
+
+```cmd
+REM リリースビルド
+build.bat build
+
+REM デバッグビルド
+build.bat dev
+
+REM テスト実行
+build.bat test
+
+REM または直接cargoコマンド:
+cargo test --lib
+```
+
 ### フォント埋め込みビルド
 
 日本語フォントをWASMバイナリに内蔵する場合：
+
+#### Linux / macOS
 
 ```bash
 # フォントをダウンロード
@@ -83,11 +103,30 @@ cargo test --lib
 wasm-pack build --target web --release --out-dir www/pkg -- --features embed-fonts
 ```
 
+#### Windows
+
+```cmd
+REM フォントをダウンロード
+build.bat fonts
+
+REM フォント埋め込みビルド
+wasm-pack build --target web --release --out-dir www/pkg -- --features embed-fonts
+```
+
 ### ローカルサーバーで動作確認
+
+#### Linux / macOS
 
 ```bash
 ./build.sh serve
 # http://localhost:8080 にアクセス
+```
+
+#### Windows
+
+```cmd
+build.bat serve
+REM http://localhost:8080 にアクセス
 ```
 
 ## 使い方
