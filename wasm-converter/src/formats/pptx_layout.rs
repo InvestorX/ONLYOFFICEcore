@@ -2432,35 +2432,39 @@ fn render_slide_page(
                 for para in paragraphs {
                     let indent = para.level as f64 * 18.0;
 
-                    // Concatenate all runs to get full paragraph text
-                    let mut full_text = String::new();
+                    // Add bullet if present
+                    let mut para_text = String::new();
                     if let Some(ref bullet) = para.bullet {
-                        full_text.push_str(bullet);
-                        full_text.push(' ');
+                        para_text.push_str(bullet);
+                        para_text.push(' ');
                     }
 
-                    // Use first run's style for paragraph
-                    let first_run = para.runs.first();
-                    let font_size = first_run.map_or(18.0, |r| r.font_size);
-                    let bold = first_run.map_or(false, |r| r.bold);
-                    let italic = first_run.map_or(false, |r| r.italic);
-                    let color = first_run.and_then(|r| r.color).unwrap_or(Color::BLACK);
-
+                    // Concatenate all run texts to get full paragraph
                     for run in &para.runs {
-                        full_text.push_str(&run.text);
+                        para_text.push_str(&run.text);
                     }
 
-                    if !full_text.trim().is_empty() {
+                    if !para_text.trim().is_empty() {
+                        // Get font size from first run for line height calculation
+                        let first_run = para.runs.first();
+                        let font_size = first_run.map_or(18.0, |r| r.font_size);
                         let line_height = font_size * 1.3;
 
                         // Word-wrap the text within the shape width
                         let available_width = shape.width - margin_left - margin_right - indent;
-                        let lines = wrap_text(&full_text, available_width, font_size);
+                        let lines = wrap_text(&para_text, available_width, font_size);
 
                         for line in &lines {
                             if text_y + font_size > shape.y + shape.height {
                                 break; // Clip to shape bounds
                             }
+
+                            // Render each run in the line with its own style
+                            // For now, use first run's style for the entire line (simplified approach)
+                            // TODO: Support mixed formatting within a line
+                            let bold = first_run.map_or(false, |r| r.bold);
+                            let italic = first_run.map_or(false, |r| r.italic);
+                            let color = first_run.and_then(|r| r.color).unwrap_or(Color::BLACK);
 
                             page.elements.push(PageElement::Text {
                                 x: shape.x + margin_left + indent,
@@ -2480,6 +2484,7 @@ fn render_slide_page(
                         }
                     } else {
                         // Empty paragraph - add line spacing
+                        let font_size = para.runs.first().map_or(18.0, |r| r.font_size);
                         text_y += font_size * 0.8;
                     }
                 }
