@@ -117,15 +117,22 @@ const zipBytes = converter.convertToImagesZip('document.xlsx', fileData, 150);
 const result = convertDocument('report.txt', textData, 'pdf');
 ```
 
+### 内蔵フォント
+
+デフォルトで **Noto Sans CJK JP**（サブセット版、約130KB）が内蔵されています。
+このフォントは以下の文字セットをカバーします:
+- ASCII（U+0020-007E）、Latin-1 Supplement（U+00A0-00FF）
+- ひらがな（U+3040-309F）、カタカナ（U+30A0-30FF）
+- CJK記号・句読点（U+3000-303F）
+- 基本漢字（約500字：常用漢字の主要部分）
+- 全角英数字・カタカナ
+
+フォント未埋め込み時でも基本的なラテン文字・日本語テキストが正しく描画されます。
+
 ### 外部フォントの追加（実行時読み込み）
 
-コンパイル後のWASMバイナリに対して、実行時に外部フォントを読み込むことができます。
-これにより、ドキュメント内で参照されているフォントに近い描画が可能になります。
-
-**フォントの読み込みは、PDFとPNG画像の両方で正確な文字描画を実現するために重要です。**
-フォントが読み込まれていない場合、PDF出力ではラテン文字のみ（Helveticaフォールバック）が表示され、
-PNG画像出力では簡易矩形描画にフォールバックします。日本語・中国語・韓国語（CJK）テキストの
-正確な表示には、対応フォント（例: Noto Sans JP）の読み込みが必要です。
+より多くの漢字や他のCJK言語の文字を表示するには、実行時に外部フォントを読み込んでください。
+コンパイル後のWASMバイナリに対して、`addFont()`で外部フォントを追加できます。
 
 ```javascript
 const converter = new WasmConverter();
@@ -165,14 +172,14 @@ converter.removeFont('NotoSansJP');
 
 | モジュール | 説明 |
 |:---|:---|
-| `converter.rs` | コアトレイト・型定義（Document, Page, PageElement, GradientRect, Ellipse等） |
-| `pdf_writer.rs` | 軽量PDF生成エンジン（外部依存なし、Unicode対応、グラデーション、ベジェ楕円、Helveticaフォールバック） |
-| `image_renderer.rs` | ページ画像化（ab_glyphフォントラスタライズ、JPEG/PNGデコード、グラデーション描画、楕円描画） + ZIPバンドル |
-| `font_manager.rs` | フォント管理（内蔵フォント + 実行時外部フォント読み込み、CJKフォント名自動解決） |
-| `formats/pptx_layout.rs` | PPTXコンバーター（シェイプ/塗り/グラデーション/テーマ/グループ/シャドウ/3D/チャート/SmartArt） |
+| `converter.rs` | コアトレイト・型定義（Document, Page, PageElement, PathCommand, GradientRect, Ellipse等） |
+| `pdf_writer.rs` | 軽量PDF生成エンジン（Unicode対応、グラデーション、ベジェ楕円、パス描画、Helveticaフォールバック） |
+| `image_renderer.rs` | ページ画像化（ab_glyphフォントラスタライズ、パススキャンライン塗りつぶし、JPEG/PNGデコード、グラデーション・楕円描画） + ZIPバンドル |
+| `font_manager.rs` | フォント管理（NotoSansJP内蔵 + 実行時外部フォント読み込み、CJKフォント名自動解決） |
+| `formats/pptx_layout.rs` | PPTXコンバーター（シェイプ/塗り/グラデーション/テーマ/グループ/シャドウ/3D/チャート/SmartArt/プリセットジオメトリ/カスタムジオメトリ） |
 | `formats/docx_layout.rs` | DOCXコンバーター（段落/ラン書式/テーブル/画像/自動ページ分割） |
 | `formats/chart.rs` | チャートレンダリング（棒/円/面/折れ線/散布） |
-| `formats/smartart.rs` | SmartArt/ダイアグラムレンダリング |
+| `formats/smartart.rs` | SmartArt/ダイアグラムレンダリング（dsp:drawing解析、テキスト抽出、グリッドレイアウト） |
 | `formats/odt.rs` | ODTコンバーター（OpenDocument Text テキスト抽出・メタデータ） |
 | `formats/epub.rs` | EPUBコンバーター（OPF/spine解析・XHTML テキスト抽出） |
 | `formats/odp.rs` | ODPコンバーター（OpenDocument Presentation スライドテキスト抽出） |
