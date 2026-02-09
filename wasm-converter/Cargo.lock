@@ -739,7 +739,7 @@ checksum = "a8145dd1593bf0fb137dbfa85b8be79ec560a447298955877804640e40c2d6ea"
 
 [[package]]
 name = "wasm-document-converter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "calamine",

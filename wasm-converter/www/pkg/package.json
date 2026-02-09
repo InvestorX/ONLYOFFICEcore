@@ -5,7 +5,7 @@
     "ONLYOFFICE Contributors"
   ],
   "description": "WebAssembly document converter - converts DOC, DOCX, ODT, RTF, TXT, EPUB, XPS, DjVu, XLS, XLSX, ODS, CSV, PPT, PPTX, ODP to PDF or page images (ZIP)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "AGPL-3.0",
   "files": [
     "wasm_document_converter_bg.wasm",
