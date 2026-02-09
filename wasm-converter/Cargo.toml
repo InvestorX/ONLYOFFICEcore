@@ -1,6 +1,6 @@
 [package]
 name = "wasm-document-converter"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["ONLYOFFICE Contributors"]
 description = "WebAssembly document converter - converts DOC, DOCX, ODT, RTF, TXT, EPUB, XPS, DjVu, XLS, XLSX, ODS, CSV, PPT, PPTX, ODP to PDF or page images (ZIP)"

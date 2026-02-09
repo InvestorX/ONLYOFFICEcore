@@ -24,6 +24,9 @@ enum ChartType {
     Area,
     Line,
     Scatter,
+    Doughnut,
+    Radar,
+    Bubble,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +72,7 @@ pub fn render_chart(
                     fill: Some(Color::rgb(245, 245, 245)),
                     stroke: Some(Color::rgb(200, 200, 200)),
                     stroke_width: 1.0,
+                    rotation_deg: 0.0,
                 },
                 PageElement::Text {
                     x: x + 10.0,
@@ -123,7 +127,7 @@ fn parse_chart_xml(xml: &str) -> Option<ChartDef> {
                 let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
 
                 match name {
-                    "barChart" => {
+                    "barChart" | "bar3DChart" => {
                         current_chart_type_name = "barChart".to_string();
                         in_chart_type = true;
                     }
@@ -131,20 +135,36 @@ fn parse_chart_xml(xml: &str) -> Option<ChartDef> {
                         current_chart_type_name = "pie3DChart".to_string();
                         in_chart_type = true;
                     }
-                    "pieChart" => {
+                    "pieChart" | "ofPieChart" => {
                         current_chart_type_name = "pieChart".to_string();
                         in_chart_type = true;
                     }
-                    "areaChart" => {
+                    "areaChart" | "area3DChart" => {
                         current_chart_type_name = "areaChart".to_string();
                         in_chart_type = true;
                     }
-                    "lineChart" => {
+                    "lineChart" | "line3DChart" | "stockChart" => {
                         current_chart_type_name = "lineChart".to_string();
                         in_chart_type = true;
                     }
                     "scatterChart" => {
                         current_chart_type_name = "scatterChart".to_string();
+                        in_chart_type = true;
+                    }
+                    "bubbleChart" => {
+                        current_chart_type_name = "bubbleChart".to_string();
+                        in_chart_type = true;
+                    }
+                    "doughnutChart" => {
+                        current_chart_type_name = "doughnutChart".to_string();
+                        in_chart_type = true;
+                    }
+                    "radarChart" => {
+                        current_chart_type_name = "radarChart".to_string();
+                        in_chart_type = true;
+                    }
+                    "surfaceChart" | "surface3DChart" => {
+                        current_chart_type_name = "surfaceChart".to_string();
                         in_chart_type = true;
                     }
                     "barDir" => {
@@ -183,7 +203,10 @@ fn parse_chart_xml(xml: &str) -> Option<ChartDef> {
                 let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
 
                 match name {
-                    "barChart" | "pie3DChart" | "pieChart" | "areaChart" | "lineChart" | "scatterChart" => {
+                    "barChart" | "bar3DChart" | "pie3DChart" | "pieChart" | "ofPieChart"
+                    | "areaChart" | "area3DChart" | "lineChart" | "line3DChart" | "stockChart"
+                    | "scatterChart" | "bubbleChart" | "doughnutChart" | "radarChart"
+                    | "surfaceChart" | "surface3DChart" => {
                         in_chart_type = false;
                         chart_type = Some(match current_chart_type_name.as_str() {
                             "barChart" => ChartType::Bar { direction: bar_dir.clone(), grouping: bar_grouping.clone() },
@@ -192,6 +215,10 @@ fn parse_chart_xml(xml: &str) -> Option<ChartDef> {
                             "areaChart" => ChartType::Area,
                             "lineChart" => ChartType::Line,
                             "scatterChart" => ChartType::Scatter,
+                            "bubbleChart" => ChartType::Bubble,
+                            "doughnutChart" => ChartType::Doughnut,
+                            "radarChart" => ChartType::Radar,
+                            "surfaceChart" => ChartType::Line, // Approximate as line chart
                             _ => ChartType::Bar { direction: BarDirection::Column, grouping: "clustered".to_string() },
                         });
                     }
@@ -280,6 +307,7 @@ fn render_chart_def(
         fill: Some(Color::WHITE),
         stroke: Some(Color::rgb(200, 200, 200)),
         stroke_width: 0.5,
+        rotation_deg: 0.0,
     });
 
     let margin = 20.0;
@@ -311,16 +339,16 @@ fn render_chart_def(
         ChartType::Bar { direction, grouping } => {
             render_bar_chart(&mut elements, &def.series, plot_x, plot_y, plot_w, plot_h, direction, grouping);
         }
-        ChartType::Pie3D | ChartType::Pie => {
+        ChartType::Pie3D | ChartType::Pie | ChartType::Doughnut => {
             render_pie_chart(&mut elements, &def.series, plot_x, plot_y, plot_w, plot_h, matches!(def.chart_type, ChartType::Pie3D));
         }
         ChartType::Area => {
             render_area_chart(&mut elements, &def.series, plot_x, plot_y, plot_w, plot_h);
         }
-        ChartType::Line => {
+        ChartType::Line | ChartType::Radar => {
             render_line_chart(&mut elements, &def.series, plot_x, plot_y, plot_w, plot_h);
         }
-        ChartType::Scatter => {
+        ChartType::Scatter | ChartType::Bubble => {
             render_line_chart(&mut elements, &def.series, plot_x, plot_y, plot_w, plot_h);
         }
     }
@@ -413,6 +441,7 @@ fn render_bar_chart(
                         fill: Some(ser.color),
                         stroke: None,
                         stroke_width: 0.0,
+                        rotation_deg: 0.0,
                     });
                 }
             }
@@ -433,6 +462,7 @@ fn render_bar_chart(
                         fill: Some(ser.color),
                         stroke: None,
                         stroke_width: 0.0,
+                        rotation_deg: 0.0,
                     });
                 }
             }
@@ -482,6 +512,7 @@ fn render_pie_chart(
                 fill: Some(Color::rgb(150, 150, 150)),
                 stroke: None,
                 stroke_width: 0.0,
+                rotation_deg: 0.0,
             });
         }
     }
@@ -543,6 +574,7 @@ fn render_pie_chart(
                         fill: Some(color),
                         stroke: None,
                         stroke_width: 0.0,
+                        rotation_deg: 0.0,
                     });
                 }
             }
@@ -577,6 +609,7 @@ fn render_pie_chart(
         fill: None,
         stroke: Some(Color::rgb(100, 100, 100)),
         stroke_width: 0.5,
+        rotation_deg: 0.0,
     });
 }
 
@@ -652,6 +685,7 @@ fn render_area_chart(
                 fill: Some(color_fill),
                 stroke: None,
                 stroke_width: 0.0,
+                rotation_deg: 0.0,
             });
         }
 
@@ -755,6 +789,7 @@ fn render_line_chart(
                 fill: Some(ser.color),
                 stroke: Some(Color::WHITE),
                 stroke_width: 1.0,
+                rotation_deg: 0.0,
             });
         }
     }
@@ -776,6 +811,7 @@ fn render_legend(
             fill: Some(ser.color),
             stroke: None,
             stroke_width: 0.0,
+            rotation_deg: 0.0,
         });
         // Label
         elements.push(PageElement::Text {

@@ -198,6 +198,8 @@ pub enum PageElement {
         fill: Option<Color>,
         stroke: Option<Color>,
         stroke_width: f64,
+        #[serde(default)]
+        rotation_deg: f64,
     },
     /// グラデーション矩形
     GradientRect {
@@ -207,6 +209,8 @@ pub enum PageElement {
         height: f64,
         stops: Vec<GradientStop>,
         gradient_type: GradientType,
+        #[serde(default)]
+        rotation_deg: f64,
     },
     /// 楕円
     Ellipse {
@@ -217,6 +221,8 @@ pub enum PageElement {
         fill: Option<Color>,
         stroke: Option<Color>,
         stroke_width: f64,
+        #[serde(default)]
+        rotation_deg: f64,
     },
     /// 楕円クリップされた画像
     EllipseImage {
@@ -228,6 +234,8 @@ pub enum PageElement {
         mime_type: String,
         stroke: Option<Color>,
         stroke_width: f64,
+        #[serde(default)]
+        rotation_deg: f64,
     },
     /// カスタムパス/図形
     Path {
@@ -235,6 +243,8 @@ pub enum PageElement {
         fill: Option<Color>,
         stroke: Option<Color>,
         stroke_width: f64,
+        #[serde(default)]
+        rotation_deg: f64,
     },
     /// パスクリップされた画像
     PathImage {
@@ -243,6 +253,8 @@ pub enum PageElement {
         mime_type: String,
         stroke: Option<Color>,
         stroke_width: f64,
+        #[serde(default)]
+        rotation_deg: f64,
     },
     /// テーブル
     TableBlock {

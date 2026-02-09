@@ -1440,3 +1440,190 @@ fn test_render_text_control_char_safety() {
         }
     }
 }
+
+/// 新チャートタイプ（doughnut/radar/bubble/surface）のパース確認テスト
+#[test]
+fn test_chart_type_parsing_new_types() {
+    use wasm_document_converter::formats::chart;
+
+    // Test doughnut chart
+    let doughnut_xml = r#"<?xml version="1.0"?>
+    <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+        <c:chart><c:plotArea>
+            <c:doughnutChart>
+                <c:ser>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Sales</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:cat><c:strRef><c:strCache>
+                        <c:pt idx="0"><c:v>A</c:v></c:pt>
+                        <c:pt idx="1"><c:v>B</c:v></c:pt>
+                    </c:strCache></c:strRef></c:cat>
+                    <c:val><c:numRef><c:numCache>
+                        <c:pt idx="0"><c:v>60</c:v></c:pt>
+                        <c:pt idx="1"><c:v>40</c:v></c:pt>
+                    </c:numCache></c:numRef></c:val>
+                </c:ser>
+            </c:doughnutChart>
+        </c:plotArea></c:chart>
+    </c:chartSpace>"#;
+
+    let elements = chart::render_chart(doughnut_xml, 0.0, 0.0, 300.0, 300.0);
+    // Should produce chart elements (not just a placeholder [Chart] box)
+    assert!(elements.len() > 2, "doughnutChart should produce chart elements, got {}", elements.len());
+
+    // Test radar chart
+    let radar_xml = r#"<?xml version="1.0"?>
+    <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+        <c:chart><c:plotArea>
+            <c:radarChart>
+                <c:ser>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Skill</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:cat><c:strRef><c:strCache>
+                        <c:pt idx="0"><c:v>X</c:v></c:pt>
+                        <c:pt idx="1"><c:v>Y</c:v></c:pt>
+                        <c:pt idx="2"><c:v>Z</c:v></c:pt>
+                    </c:strCache></c:strRef></c:cat>
+                    <c:val><c:numRef><c:numCache>
+                        <c:pt idx="0"><c:v>5</c:v></c:pt>
+                        <c:pt idx="1"><c:v>3</c:v></c:pt>
+                        <c:pt idx="2"><c:v>4</c:v></c:pt>
+                    </c:numCache></c:numRef></c:val>
+                </c:ser>
+            </c:radarChart>
+        </c:plotArea></c:chart>
+    </c:chartSpace>"#;
+
+    let radar_elements = chart::render_chart(radar_xml, 0.0, 0.0, 300.0, 300.0);
+    assert!(radar_elements.len() > 2, "radarChart should produce chart elements, got {}", radar_elements.len());
+
+    // Test bubble chart
+    let bubble_xml = r#"<?xml version="1.0"?>
+    <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+        <c:chart><c:plotArea>
+            <c:bubbleChart>
+                <c:ser>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Data</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:cat><c:strRef><c:strCache>
+                        <c:pt idx="0"><c:v>P1</c:v></c:pt>
+                        <c:pt idx="1"><c:v>P2</c:v></c:pt>
+                    </c:strCache></c:strRef></c:cat>
+                    <c:val><c:numRef><c:numCache>
+                        <c:pt idx="0"><c:v>10</c:v></c:pt>
+                        <c:pt idx="1"><c:v>20</c:v></c:pt>
+                    </c:numCache></c:numRef></c:val>
+                </c:ser>
+            </c:bubbleChart>
+        </c:plotArea></c:chart>
+    </c:chartSpace>"#;
+
+    let bubble_elements = chart::render_chart(bubble_xml, 0.0, 0.0, 300.0, 300.0);
+    assert!(bubble_elements.len() > 2, "bubbleChart should produce chart elements, got {}", bubble_elements.len());
+
+    // Test surface chart (approximated as line)
+    let surface_xml = r#"<?xml version="1.0"?>
+    <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
+        <c:chart><c:plotArea>
+            <c:surfaceChart>
+                <c:ser>
+                    <c:tx><c:strRef><c:strCache><c:pt idx="0"><c:v>Temp</c:v></c:pt></c:strCache></c:strRef></c:tx>
+                    <c:cat><c:strRef><c:strCache>
+                        <c:pt idx="0"><c:v>Mon</c:v></c:pt>
+                        <c:pt idx="1"><c:v>Tue</c:v></c:pt>
+                    </c:strCache></c:strRef></c:cat>
+                    <c:val><c:numRef><c:numCache>
+                        <c:pt idx="0"><c:v>15</c:v></c:pt>
+                        <c:pt idx="1"><c:v>18</c:v></c:pt>
+                    </c:numCache></c:numRef></c:val>
+                </c:ser>
+            </c:surfaceChart>
+        </c:plotArea></c:chart>
+    </c:chartSpace>"#;
+
+    let surface_elements = chart::render_chart(surface_xml, 0.0, 0.0, 300.0, 300.0);
+    assert!(surface_elements.len() > 2, "surfaceChart should produce chart elements, got {}", surface_elements.len());
+}
+
+/// テーブル結合セル（gridSpan/rowSpan/hMerge/vMerge）のパース＆PDF描画テスト
+#[test]
+fn test_table_merge_cell_rendering() {
+    use wasm_document_converter::converter::{
+        Page, PageElement, Table, TableCell,
+    };
+
+    // Build a 3x3 table where:
+    //  - Row 0: cell(0,0) spans 2 columns (gridSpan=2), cell(0,1) is continuation, cell(0,2) normal
+    //  - Row 1: cell(1,0) spans 2 rows (rowSpan=2), cell(1,1) and cell(1,2) normal
+    //  - Row 2: cell(2,0) is vMerge continuation (col_span=0), cell(2,1) and cell(2,2) normal
+
+    // Row 0: "A" spans cols 0-1, continuation cell, "C" normal
+    let mut cell_a = TableCell::new("A merged");
+    cell_a.col_span = 2;
+    cell_a.row_span = 1;
+    let mut cell_b_cont = TableCell::new(""); // hMerge continuation
+    cell_b_cont.col_span = 0;
+    cell_b_cont.row_span = 0;
+    let cell_c = TableCell::new("C");
+
+    // Row 1: "D" spans rows 1-2, "E" normal, "F" normal
+    let mut cell_d = TableCell::new("D tall");
+    cell_d.col_span = 1;
+    cell_d.row_span = 2;
+    let cell_e = TableCell::new("E");
+    let cell_f = TableCell::new("F");
+
+    // Row 2: continuation of D (vMerge), "G" normal, "H" normal
+    let mut cell_d_cont = TableCell::new(""); // vMerge continuation
+    cell_d_cont.col_span = 0;
+    cell_d_cont.row_span = 0;
+    let cell_g = TableCell::new("G");
+    let cell_h = TableCell::new("H");
+
+    let table = Table {
+        rows: vec![
+            vec![cell_a, cell_b_cont, cell_c],
+            vec![cell_d, cell_e, cell_f],
+            vec![cell_d_cont, cell_g, cell_h],
+        ],
+        column_widths: vec![100.0, 80.0, 120.0],
+    };
+
+    // Verify the col_span/row_span values are correctly set
+    assert_eq!(table.rows[0][0].col_span, 2, "cell A should span 2 columns");
+    assert_eq!(table.rows[0][1].col_span, 0, "cell B continuation col_span should be 0");
+    assert_eq!(table.rows[0][1].row_span, 0, "cell B continuation row_span should be 0");
+    assert_eq!(table.rows[1][0].row_span, 2, "cell D should span 2 rows");
+    assert_eq!(table.rows[2][0].col_span, 0, "cell D continuation col_span should be 0");
+
+    let page = Page {
+        width: 500.0,
+        height: 400.0,
+        elements: vec![PageElement::TableBlock {
+            x: 10.0,
+            y: 10.0,
+            width: 300.0,
+            table,
+        }],
+    };
+
+    let mut doc = Document::new();
+    doc.pages.push(page);
+
+    let fm = FontManager::new();
+    let pdf = pdf_writer::render_to_pdf_with_fonts(&doc, &fm);
+    let pdf_str = String::from_utf8_lossy(&pdf);
+
+    // Merged cell "A merged" should have a single border rect with width = 100+80 = 180
+    // The continuation cell should NOT produce its own border or text
+    assert!(
+        pdf_str.contains("180"), // merged width of cols 0+1
+        "Merged cell A should produce a rect with combined width 180"
+    );
+
+    // Text content checks: "A merged" should appear, continuation cell text should not
+    let tj_count = pdf_str.matches("Tj").count();
+    // Cells with text: A merged, C, D tall, E, F, G, H = 7 cells with text
+    assert!(
+        tj_count >= 7,
+        "Should have Tj operators for all non-empty/non-continuation cells, got {}",
+        tj_count
+    );
+}

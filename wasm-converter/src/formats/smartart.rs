@@ -86,6 +86,7 @@ pub fn render_smartart(
                 fill: Some(fill),
                 stroke: Some(Color::WHITE),
                 stroke_width: 1.0,
+                rotation_deg: 0.0,
             });
         } else {
             elements.push(PageElement::Rect {
@@ -93,6 +94,7 @@ pub fn render_smartart(
                 fill: Some(fill),
                 stroke: Some(Color::WHITE),
                 stroke_width: 1.0,
+                rotation_deg: 0.0,
             });
         }
 
@@ -408,6 +410,7 @@ fn render_text_grid(x: f64, y: f64, width: f64, height: f64, items: &[String]) -
             fill: Some(fill),
             stroke: Some(Color::WHITE),
             stroke_width: 1.0,
+            rotation_deg: 0.0,
         });
 
         let font_size = (cell_h * 0.25).min(MAX_FONT_SIZE).max(MIN_FONT_SIZE);
@@ -437,6 +440,7 @@ fn render_placeholder(x: f64, y: f64, width: f64, height: f64) -> Vec<PageElemen
             fill: Some(Color::rgb(240, 240, 240)),
             stroke: Some(Color::rgb(200, 200, 200)),
             stroke_width: 1.0,
+            rotation_deg: 0.0,
         },
         PageElement::Text {
             x: x + 10.0,

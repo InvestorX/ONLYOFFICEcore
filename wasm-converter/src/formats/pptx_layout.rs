@@ -1348,12 +1348,13 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                     if local == b"buChar" {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"char" {
-                                cur_bullet =
-                                    Some(String::from_utf8_lossy(&attr.value).to_string());
+                                let raw = String::from_utf8_lossy(&attr.value).to_string();
+                                // Map Wingdings/Symbol PUA characters to standard Unicode equivalents
+                                cur_bullet = Some(normalize_bullet_char(&raw));
                             }
                         }
                     } else {
-                        cur_bullet = Some("•".to_string());
+                        cur_bullet = Some(DEFAULT_BULLET.to_string());
                     }
                 }
 
@@ -1565,7 +1566,7 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             rotation: cur_rotation,
                             shadow: None,
                             has_3d: false,
-                            preset_geometry: None,
+                            preset_geometry: cur_preset_geom.clone(),
                             custom_path: None,
                             custom_path_viewport: None,
                             fill_image_r_id: None,
@@ -1725,6 +1726,30 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
 }
 
 /// XML要素から色を解析（テーマカラー対応版）
+/// デフォルトのbullet文字
+const DEFAULT_BULLET: char = '\u{2022}'; // •
+
+/// Wingdings/Symbol等のPUA文字を標準Unicodeのbullet文字に正規化
+fn normalize_bullet_char(raw: &str) -> String {
+    let ch = raw.chars().next().unwrap_or(DEFAULT_BULLET);
+    let cp = ch as u32;
+    // Wingdings PUA (F020-F0FF) and common symbol ranges
+    let mapped = match cp {
+        0xF06C | 0xF0B7 | 0xF076 => DEFAULT_BULLET, // bullet •
+        0xF06E | 0xF0A8 => '\u{25A0}',            // black square ■
+        0xF0D8 | 0xF0E0 => '\u{25B6}',            // right triangle ▶
+        0xF0FC => '\u{2713}',                       // check mark ✓
+        0xF0A7 => '\u{25CF}',                       // black circle ●
+        0xF02D => '\u{2013}',                       // en dash –
+        0xF0B2 => '\u{25C6}',                       // black diamond ◆
+        0xF0D6 => '\u{279C}',                       // right arrow ➜
+        0xF0E8 => '\u{2605}',                       // black star ★
+        cp if cp >= 0xF000 && cp <= 0xF0FF => DEFAULT_BULLET, // other PUA → bullet
+        _ => ch,
+    };
+    mapped.to_string()
+}
+
 fn parse_color_element_themed(e: &quick_xml::events::BytesStart, theme: &ThemeColors) -> Option<Color> {
     let local = e.local_name();
     match local.as_ref() {
@@ -2228,6 +2253,10 @@ fn detect_and_render_tables(
     let mut in_tc_pr = false;
     let mut in_solid_fill = false;
     let mut tc_para_count = 0u32; // 現在のセル内の段落数
+    let mut cur_col_span = 1u32;
+    let mut cur_row_span = 1u32;
+    let mut cur_h_merge = false;
+    let mut cur_v_merge = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -2271,6 +2300,32 @@ fn detect_and_render_tables(
                         current_cell_text.clear();
                         cell_fill = None;
                         tc_para_count = 0;
+                        cur_col_span = 1;
+                        cur_row_span = 1;
+                        cur_h_merge = false;
+                        cur_v_merge = false;
+                        // Parse gridSpan and rowSpan from tc attributes
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"gridSpan" => {
+                                    cur_col_span = String::from_utf8_lossy(&attr.value)
+                                        .parse::<u32>()
+                                        .unwrap_or(1);
+                                }
+                                b"rowSpan" => {
+                                    cur_row_span = String::from_utf8_lossy(&attr.value)
+                                        .parse::<u32>()
+                                        .unwrap_or(1);
+                                }
+                                b"hMerge" => {
+                                    cur_h_merge = attr.value.as_ref() == b"1" || attr.value.as_ref() == b"true";
+                                }
+                                b"vMerge" => {
+                                    cur_v_merge = attr.value.as_ref() == b"1" || attr.value.as_ref() == b"true";
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     b"tcPr" if in_tc => {
                         in_tc_pr = true;
@@ -2380,11 +2435,21 @@ fn detect_and_render_tables(
                     }
                     b"tc" => {
                         if in_tc {
-                            let mut cell = TableCell::new(&current_cell_text);
-                            if let Some(c) = cell_fill {
-                                cell.style.color = c;
+                            if cur_h_merge || cur_v_merge {
+                                // Merged continuation cell - push empty cell with span=0
+                                let mut cell = TableCell::new("");
+                                cell.col_span = 0;
+                                cell.row_span = 0;
+                                current_row.push(cell);
+                            } else {
+                                let mut cell = TableCell::new(&current_cell_text);
+                                cell.col_span = cur_col_span;
+                                cell.row_span = cur_row_span;
+                                if let Some(c) = cell_fill {
+                                    cell.style.color = c;
+                                }
+                                current_row.push(cell);
                             }
-                            current_row.push(cell);
                         }
                         in_tc = false;
                         in_tc_pr = false;
@@ -2440,6 +2505,7 @@ fn render_slide_page(
                 fill: Some(*color),
                 stroke: None,
                 stroke_width: 0.0,
+                rotation_deg: 0.0,
             });
         }
         Some(SlideBg::Gradient { stops, angle }) => {
@@ -2450,6 +2516,7 @@ fn render_slide_page(
                 height: slide_size.height,
                 stops: stops.clone(),
                 gradient_type: GradientType::Linear(*angle),
+                rotation_deg: 0.0,
             });
         }
         Some(SlideBg::Image { data, mime_type }) => {
@@ -2482,6 +2549,7 @@ fn render_slide_page(
                 }),
                 stroke: None,
                 stroke_width: 0.0,
+                rotation_deg: 0.0,
             });
         }
 
@@ -2512,6 +2580,7 @@ fn render_slide_page(
                         fill: Some(dark_color),
                         stroke: None,
                         stroke_width: 0.0,
+                        rotation_deg: 0.0,
                     });
                     // Right depth strip
                     page.elements.push(PageElement::Rect {
@@ -2522,6 +2591,7 @@ fn render_slide_page(
                         fill: Some(dark_color),
                         stroke: None,
                         stroke_width: 0.0,
+                        rotation_deg: 0.0,
                     });
                 }
 
@@ -2563,6 +2633,7 @@ fn render_slide_page(
                                 mime_type: mime_type.clone(),
                                 stroke: stroke_color,
                                 stroke_width: stroke_w,
+                                rotation_deg: shape.rotation,
                             });
                         } else {
                             let fill_color = match &shape.fill {
@@ -2575,6 +2646,7 @@ fn render_slide_page(
                                 fill: fill_color,
                                 stroke: stroke_color,
                                 stroke_width: stroke_w,
+                                rotation_deg: shape.rotation,
                             });
                         }
                         shape_rendered = true;
@@ -2600,6 +2672,7 @@ fn render_slide_page(
                                     fill,
                                     stroke: stroke_color,
                                     stroke_width: stroke_w,
+                                    rotation_deg: shape.rotation,
                                 });
                             }
                             shape_rendered = true;
@@ -2616,6 +2689,7 @@ fn render_slide_page(
                                         mime_type: mime_type.clone(),
                                         stroke: stroke_color,
                                         stroke_width: stroke_w,
+                                        rotation_deg: shape.rotation,
                                     });
                                 } else {
                                     let fill_color = match &shape.fill {
@@ -2628,6 +2702,7 @@ fn render_slide_page(
                                         fill: fill_color,
                                         stroke: stroke_color,
                                         stroke_width: stroke_w,
+                                        rotation_deg: shape.rotation,
                                     });
                                 }
                                 shape_rendered = true;
@@ -2656,6 +2731,7 @@ fn render_slide_page(
                                 mime_type: mime_type.clone(),
                                 stroke: stroke_info.map(|(c, _)| c),
                                 stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
+                                rotation_deg: shape.rotation,
                             });
                             shape_rendered = true;
                         } else {
@@ -2673,6 +2749,7 @@ fn render_slide_page(
                                 fill: fill_color,
                                 stroke: stroke_info.map(|(c, _)| c),
                                 stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
+                                rotation_deg: shape.rotation,
                             });
                             shape_rendered = true;
                         }
@@ -2688,6 +2765,7 @@ fn render_slide_page(
                                     fill: Some(*color),
                                     stroke: None,
                                     stroke_width: 0.0,
+                                    rotation_deg: shape.rotation,
                                 });
                             }
                             Some(ShapeFill::Gradient { stops, angle }) => {
@@ -2698,6 +2776,7 @@ fn render_slide_page(
                                     height: shape.height,
                                     stops: stops.clone(),
                                     gradient_type: GradientType::Linear(*angle),
+                                    rotation_deg: shape.rotation,
                                 });
                             }
                             Some(ShapeFill::Image { data, mime_type }) => {
@@ -2728,6 +2807,7 @@ fn render_slide_page(
                             fill: None,
                             stroke: Some(color),
                             stroke_width: width,
+                            rotation_deg: shape.rotation,
                         });
                     }
                 }
@@ -2903,6 +2983,7 @@ fn render_slide_page(
                     fill: Some(Color::rgb(230, 230, 230)),
                     stroke: Some(Color::rgb(180, 180, 180)),
                     stroke_width: 0.5,
+                    rotation_deg: shape.rotation,
                 });
                 page.elements.push(PageElement::Text {
                     x: shape.x + 4.0,
@@ -2920,20 +3001,40 @@ fn render_slide_page(
             }
 
             ShapeContent::Connector => {
-                // Draw line from top-left to bottom-right
-                let color = shape
-                    .outline
-                    .map(|(c, _)| c)
-                    .unwrap_or(Color::rgb(0, 0, 0));
-                let width = shape.outline.map(|(_, w)| w).unwrap_or(1.0);
-                page.elements.push(PageElement::Line {
-                    x1: shape.x,
-                    y1: shape.y,
-                    x2: shape.x + shape.width,
-                    y2: shape.y + shape.height,
-                    width,
-                    color,
-                });
+                // Try rendering connector using preset geometry path
+                let mut connector_rendered = false;
+                if let Some(ref geom_name) = shape.preset_geometry {
+                    if let Some(path_cmds) = generate_preset_path(geom_name, shape.x, shape.y, shape.width, shape.height) {
+                        let (stroke_color, stroke_w) = shape.outline.map_or(
+                            (Some(Color::BLACK), 1.0),
+                            |(c, w)| (Some(c), w),
+                        );
+                        page.elements.push(PageElement::Path {
+                            commands: path_cmds,
+                            fill: None,
+                            stroke: stroke_color,
+                            stroke_width: stroke_w,
+                            rotation_deg: shape.rotation,
+                        });
+                        connector_rendered = true;
+                    }
+                }
+                if !connector_rendered {
+                    // Fallback: draw line from top-left to bottom-right
+                    let color = shape
+                        .outline
+                        .map(|(c, _)| c)
+                        .unwrap_or(Color::rgb(0, 0, 0));
+                    let width = shape.outline.map(|(_, w)| w).unwrap_or(1.0);
+                    page.elements.push(PageElement::Line {
+                        x1: shape.x,
+                        y1: shape.y,
+                        x2: shape.x + shape.width,
+                        y2: shape.y + shape.height,
+                        width,
+                        color,
+                    });
+                }
             }
 
             ShapeContent::Empty => {
@@ -2948,6 +3049,7 @@ fn render_slide_page(
                             fill: Some(*color),
                             stroke: shape.outline.map(|(c, _)| c),
                             stroke_width: shape.outline.map(|(_, w)| w).unwrap_or(0.0),
+                            rotation_deg: shape.rotation,
                         });
                     }
                     Some(ShapeFill::Gradient { stops, angle }) => {
@@ -2958,6 +3060,7 @@ fn render_slide_page(
                             height: shape.height,
                             stops: stops.clone(),
                             gradient_type: GradientType::Linear(*angle),
+                            rotation_deg: shape.rotation,
                         });
                     }
                     Some(ShapeFill::Image { data, mime_type }) => {
@@ -2980,6 +3083,7 @@ fn render_slide_page(
                                 fill: None,
                                 stroke: Some(color),
                                 stroke_width: width,
+                                rotation_deg: shape.rotation,
                             });
                         }
                     }

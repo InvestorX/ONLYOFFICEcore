@@ -898,6 +898,7 @@ fn layout_pages(elements: &[BodyElement], setup: &PageSetup) -> Vec<Page> {
                                         fill: Some(hl_color),
                                         stroke: None,
                                         stroke_width: 0.0,
+                                        rotation_deg: 0.0,
                                     });
                                 }
 
@@ -1016,6 +1017,7 @@ fn layout_pages(elements: &[BodyElement], setup: &PageSetup) -> Vec<Page> {
                                 fill: Some(shading),
                                 stroke: None,
                                 stroke_width: 0.0,
+                                rotation_deg: 0.0,
                             });
                         }
 
@@ -1028,6 +1030,7 @@ fn layout_pages(elements: &[BodyElement], setup: &PageSetup) -> Vec<Page> {
                             fill: None,
                             stroke: Some(Color::rgb(0, 0, 0)),
                             stroke_width: 0.5,
+                            rotation_deg: 0.0,
                         });
 
                         // Cell text
