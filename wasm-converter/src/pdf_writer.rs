@@ -1135,12 +1135,16 @@ fn find_usable_font_data(font_manager: &FontManager) -> Option<Vec<u8>> {
     None
 }
 
-/// テキストをWinAnsiEncoding（Latin-1）に変換
-/// CIDフォントが利用できない場合に、Helveticaフォールバック用に使用
+/// テキストをASCIIに制限してHelveticaフォールバック用に使用
+/// PDF literal string `(...)` はバイト列として解釈されるため、
+/// Rust String（UTF-8）のマルチバイト文字を直接書くと破損する。
+/// Helvetica（/WinAnsiEncoding）は基本的にLatin-1相当だが、
+/// UTF-8→Latin-1変換の複雑さを避け、安全にASCII範囲に制限する。
 fn text_to_winansi(text: &str) -> String {
     text.chars()
         .map(|c| {
-            if u32::from(c) <= 0xFF {
+            let cp = u32::from(c);
+            if cp >= 0x20 && cp <= 0x7E {
                 c
             } else {
                 '?'
