@@ -13,6 +13,9 @@ use converter::detect_format;
 use font_manager::FontManager;
 use wasm_bindgen::prelude::*;
 
+#[cfg(target_arch = "wasm32")]
+use web_sys::console;
+
 /// WASMコンバーターのメインインスタンス
 /// JavaScriptからこのオブジェクトを作成して使用します。
 #[wasm_bindgen]
@@ -94,6 +97,9 @@ impl WasmConverter {
     /// @returns PDFバイト列
     #[wasm_bindgen(js_name = convertToPdf)]
     pub fn convert_to_pdf(&self, filename: &str, data: &[u8]) -> Result<Vec<u8>, JsValue> {
+        #[cfg(target_arch = "wasm32")]
+        console::log_1(&JsValue::from_str(&format!("Converting {} to PDF (size: {} bytes)", filename, data.len())));
+
         let ext = detect_format(filename).ok_or_else(|| {
             JsValue::from_str(&format!(
                 "サポートされていないファイル形式です: {}",
@@ -101,7 +107,14 @@ impl WasmConverter {
             ))
         })?;
 
-        let doc = formats::convert_by_extension(ext, data).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let doc = formats::convert_by_extension(ext, data).map_err(|e| {
+            #[cfg(target_arch = "wasm32")]
+            console::error_1(&JsValue::from_str(&format!("Conversion error: {}", e)));
+            JsValue::from_str(&e.to_string())
+        })?;
+
+        #[cfg(target_arch = "wasm32")]
+        console::log_1(&JsValue::from_str(&format!("Document has {} pages", doc.pages.len())));
 
         Ok(pdf_writer::render_to_pdf_with_fonts(&doc, &self.font_manager))
     }
