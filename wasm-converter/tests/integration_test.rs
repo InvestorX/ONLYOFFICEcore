@@ -1321,3 +1321,122 @@ fn test_pdf_table_rendering() {
     // "No." and "First Name" should be in the PDF text
     assert!(pdf_str.contains("Tj"), "PDF should contain text show (Tj) operators for table cells");
 }
+
+// ── テーブルセル改行テスト ──
+
+#[test]
+fn test_table_cell_multiline_rendering() {
+    // テーブルセル内に複数行のテキストがある場合のPDF出力をテスト
+    use wasm_document_converter::converter::{
+        Color, Page, PageElement, Table, TableCell,
+    };
+
+    let mut cell = TableCell::new("Line1\nLine2\nLine3");
+    cell.style.font_size = 10.0;
+    cell.style.color = Color::BLACK;
+    let table = Table {
+        rows: vec![vec![cell]],
+        column_widths: vec![200.0],
+    };
+
+    let page = Page {
+        width: 400.0,
+        height: 300.0,
+        elements: vec![PageElement::TableBlock {
+            x: 10.0,
+            y: 10.0,
+            width: 200.0,
+            table,
+        }],
+    };
+
+    let mut doc = Document::new();
+    doc.pages.push(page);
+
+    let fm = FontManager::new();
+    let pdf = pdf_writer::render_to_pdf_with_fonts(&doc, &fm);
+    let pdf_str = String::from_utf8_lossy(&pdf);
+
+    // 複数行テキストは複数のTj命令で出力されるべき
+    let tj_count = pdf_str.matches("Tj").count();
+    assert!(
+        tj_count >= 3,
+        "3-line cell text should produce at least 3 Tj operators, got {}",
+        tj_count
+    );
+}
+
+// ── フォント文字化け防止テスト ──
+
+#[test]
+fn test_cid_to_gid_map_with_unparseable_font() {
+    // パース不能なフォントデータが追加された場合でも、
+    // 内蔵フォントにフォールバックしてCIDToGIDMapが空にならないことをテスト
+    let mut fm = FontManager::new();
+    // 不正なフォントデータを追加
+    fm.add_font("BadFont".to_string(), vec![0, 1, 2, 3, 4, 5]);
+
+    let txt = "テスト Test".as_bytes();
+    let doc = formats::convert_by_extension("txt", txt).unwrap();
+    let pdf = pdf_writer::render_to_pdf_with_fonts(&doc, &fm);
+
+    // PDFが正常に生成されること
+    assert!(pdf.starts_with(b"%PDF"), "PDF should be generated even with bad external font");
+
+    // フォールバックフォントが埋め込まれていることを確認
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    assert!(
+        pdf_str.contains("/FontFile2"),
+        "PDF should embed fallback TrueType font (/FontFile2) when external font is unusable"
+    );
+}
+
+#[test]
+fn test_render_text_control_char_safety() {
+    // テキストに制御文字が含まれていてもPDFが壊れないことをテスト
+    use wasm_document_converter::converter::{Page, PageElement, TextAlign};
+
+    let page = Page {
+        width: 400.0,
+        height: 300.0,
+        elements: vec![PageElement::Text {
+            x: 10.0,
+            y: 10.0,
+            width: 200.0,
+            text: "Hello\nWorld\tTest".to_string(),
+            style: FontStyle::default(),
+            align: TextAlign::Left,
+        }],
+    };
+
+    let mut doc = Document::new();
+    doc.pages.push(page);
+
+    let fm = FontManager::new();
+    let pdf = pdf_writer::render_to_pdf_with_fonts(&doc, &fm);
+    assert!(pdf.starts_with(b"%PDF"), "PDF should be valid even with control chars in text");
+
+    // PDF 内のすべてのヘックス文字列 (<...>) を走査し、その中に 000A / 0009 が
+    // 含まれていないことを確認する
+    let pdf_str = String::from_utf8_lossy(&pdf);
+    let pdf_search = pdf_str.as_ref();
+    let mut pos = 0;
+    while let Some(start) = pdf_search[pos..].find('<') {
+        let start = pos + start;
+        if let Some(end) = pdf_search[start + 1..].find('>') {
+            let end = start + 1 + end;
+            let hex_segment = &pdf_search[start + 1..end];
+            assert!(
+                !hex_segment.contains("000A"),
+                "PDF hex text should not contain newline character encoding (000A) in any hex string"
+            );
+            assert!(
+                !hex_segment.contains("0009"),
+                "PDF hex text should not contain tab character encoding (0009) in any hex string"
+            );
+            pos = end + 1;
+        } else {
+            break;
+        }
+    }
+}

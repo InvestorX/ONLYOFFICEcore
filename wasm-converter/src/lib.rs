@@ -129,7 +129,8 @@ impl WasmConverter {
 
         let mut config = image_renderer::ImageRenderConfig::default();
         if let Some(d) = dpi {
-            config.dpi = d;
+            // DPIを72〜600の範囲にクランプしてOOMを防止
+            config.dpi = d.clamp(72.0, 600.0);
         }
 
         Ok(image_renderer::render_to_images_zip_with_config(

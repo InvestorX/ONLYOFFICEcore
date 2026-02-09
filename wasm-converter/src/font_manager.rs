@@ -50,7 +50,11 @@ impl FontManager {
     /// 外部フォントデータを追加（実行時にフォントを読み込み）
     /// WASMコンパイル後でもこのメソッドでフォントを追加できます。
     /// TTFまたはOTFフォーマットのバイト列を受け付けます。
+    /// 空データは拒否されます。
     pub fn add_font(&mut self, name: String, data: Vec<u8>) {
+        if data.is_empty() {
+            return; // 空データを拒否してPDF埋め込み時の不整合を防止
+        }
         // 同名のフォントが既にある場合は置き換える
         self.external_fonts.retain(|(n, _)| n != &name);
         self.external_fonts.push((name, data));
@@ -108,6 +112,12 @@ impl FontManager {
         }
         // 内蔵フォントにフォールバック
         self.builtin_japanese_font()
+    }
+
+    /// 外部フォントのイテレータを返す
+    /// PDF生成時にab_glyphでパース可能なフォントを検索するために使用
+    pub fn external_fonts_iter(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.external_fonts.iter().map(|(name, data)| (name.as_str(), data.as_slice()))
     }
 
     /// 名前でフォントデータを取得

@@ -30,7 +30,7 @@ download_fonts() {
     if [ ! -f "fonts/NotoSansJP-Regular.ttf" ]; then
         info "日本語フォント (Noto Sans JP) をダウンロード中..."
         mkdir -p fonts
-        FONT_URL="https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf"
+        FONT_URL="https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf"
         if command -v curl &> /dev/null; then
             curl -L -o "fonts/NotoSansJP-Regular.ttf" "$FONT_URL" 2>/dev/null || \
                 info "フォントのダウンロードに失敗しました。embed-fontsフィーチャーなしでビルドします。"

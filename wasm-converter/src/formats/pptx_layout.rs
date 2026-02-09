@@ -1513,6 +1513,17 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                         in_sp = false;
                     }
                     b"pic" if in_pic && depth == shape_depth => {
+                        // Apply style-based fill/outline as fallback (p:picのp:styleにも対応)
+                        if cur_fill.is_none() {
+                            if let Some(c) = style_fill_color {
+                                cur_fill = Some(ShapeFill::Solid(c));
+                            }
+                        }
+                        if cur_outline.is_none() {
+                            if let Some(c) = style_ln_color {
+                                cur_outline = Some((c, 1.0));
+                            }
+                        }
                         let content = if !cur_r_id.is_empty() {
                             ShapeContent::Image {
                                 r_id: cur_r_id.clone(),
@@ -2216,6 +2227,7 @@ fn detect_and_render_tables(
     let mut cell_fill: Option<Color> = None;
     let mut in_tc_pr = false;
     let mut in_solid_fill = false;
+    let mut tc_para_count = 0u32; // 現在のセル内の段落数
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -2258,12 +2270,24 @@ fn detect_and_render_tables(
                         in_tc = true;
                         current_cell_text.clear();
                         cell_fill = None;
+                        tc_para_count = 0;
                     }
                     b"tcPr" if in_tc => {
                         in_tc_pr = true;
                     }
                     b"solidFill" if in_tc_pr => {
                         in_solid_fill = true;
+                    }
+                    b"p" if in_tc => {
+                        // 2番目以降の段落では改行を挿入
+                        if tc_para_count > 0 && !current_cell_text.is_empty() {
+                            current_cell_text.push('\n');
+                        }
+                        tc_para_count += 1;
+                    }
+                    b"br" if in_tc => {
+                        // テーブルセル内の改行（Start要素）
+                        current_cell_text.push('\n');
                     }
                     b"t" if in_tc => {
                         in_tc_text = true;
@@ -2303,6 +2327,10 @@ fn detect_and_render_tables(
                                 col_widths.push(w);
                             }
                         }
+                    }
+                    b"br" if in_tc => {
+                        // テーブルセル内の改行（Empty要素）
+                        current_cell_text.push('\n');
                     }
                     _ => {
                         // Color elements in solidFill within tcPr
@@ -2556,34 +2584,64 @@ fn render_slide_page(
                 // Try path-based rendering for non-trivial geometries
                 if let Some(ref geom_name) = shape.preset_geometry {
                     if geom_name != "rect" && geom_name != "ellipse" {
-                        if let Some(path_cmds) = generate_preset_path(geom_name, shape.x, shape.y, shape.width, shape.height) {
-                            // Handle image fill for preset geometries
-                            if let Some(ShapeFill::Image { data, mime_type }) = &shape.fill {
-                                let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
-                                page.elements.push(PageElement::PathImage {
-                                    commands: path_cmds,
-                                    data: data.clone(),
-                                    mime_type: mime_type.clone(),
-                                    stroke: stroke_color,
-                                    stroke_width: stroke_w,
-                                });
-                            } else {
-                                let fill_color = match &shape.fill {
-                                    Some(ShapeFill::Solid(c)) => Some(*c),
-                                    _ => None,
-                                };
-                                let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                        // まず複数パス版を試す（サブパスを持つジオメトリ用）
+                        if let Some(path_groups) = generate_preset_paths(geom_name, shape.x, shape.y, shape.width, shape.height) {
+                            let fill_color = match &shape.fill {
+                                Some(ShapeFill::Solid(c)) => Some(*c),
+                                _ => None,
+                            };
+                            let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                            for (i, path_cmds) in path_groups.into_iter().enumerate() {
+                                // 最初のパスのみフィルを適用（サブパスはストロークのみ）
+                                // 注: smileyFaceの目など、内側パスにもフィルが必要な場合がある
+                                let fill = if i == 0 { fill_color } else { None };
                                 page.elements.push(PageElement::Path {
                                     commands: path_cmds,
-                                    fill: fill_color,
+                                    fill,
                                     stroke: stroke_color,
                                     stroke_width: stroke_w,
                                 });
                             }
                             shape_rendered = true;
                         }
+                        // 次に単一パス版を試す
+                        if !shape_rendered {
+                            if let Some(path_cmds) = generate_preset_path(geom_name, shape.x, shape.y, shape.width, shape.height) {
+                                // Handle image fill for preset geometries
+                                if let Some(ShapeFill::Image { data, mime_type }) = &shape.fill {
+                                    let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                                    page.elements.push(PageElement::PathImage {
+                                        commands: path_cmds,
+                                        data: data.clone(),
+                                        mime_type: mime_type.clone(),
+                                        stroke: stroke_color,
+                                        stroke_width: stroke_w,
+                                    });
+                                } else {
+                                    let fill_color = match &shape.fill {
+                                        Some(ShapeFill::Solid(c)) => Some(*c),
+                                        _ => None,
+                                    };
+                                    let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                                    page.elements.push(PageElement::Path {
+                                        commands: path_cmds,
+                                        fill: fill_color,
+                                        stroke: stroke_color,
+                                        stroke_width: stroke_w,
+                                    });
+                                }
+                                shape_rendered = true;
+                            }
+                        }
                     }
                 }
+                // 未実装のプリセットジオメトリは矩形に置き換えない
+                // rect/ellipse/未指定の場合のみ矩形・楕円でフォールバック描画する
+                let is_rect_or_default = match &shape.preset_geometry {
+                    None => true,
+                    Some(name) => name == "rect",
+                };
+
                 if !shape_rendered {
                     if is_ellipse {
                         // Render ellipse with image fill using elliptical clipping
@@ -2618,8 +2676,8 @@ fn render_slide_page(
                             });
                             shape_rendered = true;
                         }
-                    } else {
-                        // Standard rectangle or rounded rect rendering
+                    } else if is_rect_or_default {
+                        // 矩形フォールバックは実際の rect または未指定ジオメトリのみ
                         match &shape.fill {
                             Some(ShapeFill::Solid(color)) => {
                                 page.elements.push(PageElement::Rect {
@@ -2654,11 +2712,13 @@ fn render_slide_page(
                             }
                             None => {}
                         }
+                        shape_rendered = true;
                     }
+                    // else: 未実装のプリセットジオメトリ → 矩形での置換を行わない
                 } // end shape fill
 
-                // Shape outline (skip if already rendered as a path with stroke)
-                if !shape_rendered {
+                // Shape outline (rect/defaultの場合のみ矩形ストロークを描画)
+                if !shape_rendered && is_rect_or_default {
                     if let Some((color, width)) = shape.outline {
                         page.elements.push(PageElement::Rect {
                             x: shape.x,
@@ -3507,14 +3567,21 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
             ])
         }
         // Flowchart: Terminator (stadium/rounded rectangle)
+        // ArcToの代わりにキュービックベジェで半円を近似（レンダラーのArcTo対応が不完全なため）
         "flowChartTerminator" => {
             let r = h / 2.0;
+            // 半円をキュービックベジェで近似: 制御点係数 = 4/3 * tan(π/8) ≈ 0.5523
+            let k = r * 0.5523;
             Some(vec![
                 PathCommand::MoveTo(x + r, y),
                 PathCommand::LineTo(x + w - r, y),
-                PathCommand::ArcTo(r, r, 0.0, false, true, x + w - r, y + h),
+                // 右側半円（上→下）
+                PathCommand::CubicTo(x + w - r + k, y, x + w, y + r - k, x + w, y + r),
+                PathCommand::CubicTo(x + w, y + r + k, x + w - r + k, y + h, x + w - r, y + h),
                 PathCommand::LineTo(x + r, y + h),
-                PathCommand::ArcTo(r, r, 0.0, false, true, x + r, y),
+                // 左側半円（下→上）
+                PathCommand::CubicTo(x + r - k, y + h, x, y + r + k, x, y + r),
+                PathCommand::CubicTo(x, y + r - k, x + r - k, y, x + r, y),
                 PathCommand::Close,
             ])
         }
@@ -3535,23 +3602,8 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
             cmds.push(PathCommand::Close);
             Some(cmds)
         }
-        // Flowchart: Predefined Process (rectangle with double vertical lines)
-        "flowChartPredefinedProcess" => {
-            let margin = w * 0.1;
-            Some(vec![
-                PathCommand::MoveTo(x, y),
-                PathCommand::LineTo(x + w, y),
-                PathCommand::LineTo(x + w, y + h),
-                PathCommand::LineTo(x, y + h),
-                PathCommand::Close,
-                // Left vertical line
-                PathCommand::MoveTo(x + margin, y),
-                PathCommand::LineTo(x + margin, y + h),
-                // Right vertical line
-                PathCommand::MoveTo(x + w - margin, y),
-                PathCommand::LineTo(x + w - margin, y + h),
-            ])
-        }
+        // Flowchart: Predefined Process → generate_preset_paths() で複数パスとして出力
+        "flowChartPredefinedProcess" => None,
         // Flowchart: Input/Output (parallelogram)
         "flowChartInputOutput" => {
             let offset = w * 0.2;
@@ -3629,7 +3681,7 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
                 PathCommand::Close,
             ])
         }
-        // Flowchart: Sort (diamond with crossing lines)
+        // Flowchart: Sort (diamond with horizontal divider)
         "flowChartSort" => {
             Some(vec![
                 // Outer diamond
@@ -3638,7 +3690,7 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
                 PathCommand::LineTo(x + w / 2.0, y + h),
                 PathCommand::LineTo(x, y + h / 2.0),
                 PathCommand::Close,
-                // Horizontal line
+                // Horizontal divider line
                 PathCommand::MoveTo(x, y + h / 2.0),
                 PathCommand::LineTo(x + w, y + h / 2.0),
             ])
@@ -3662,15 +3714,20 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
             ])
         }
         // Flowchart: Delay (semi-circle on right side)
+        // 半円の中心と半径をバウンディングボックス内に収める
         "flowChartDelay" => {
+            let rx = h / 2.0; // 半円の半径（高さの半分）
+            let cx_arc = x + w - rx; // 半円の中心X（右端から半径分左）
             let steps = 24;
             let mut cmds = vec![PathCommand::MoveTo(x, y)];
+            cmds.push(PathCommand::LineTo(cx_arc, y));
             for i in 0..=steps {
                 let angle = -PI / 2.0 + PI * i as f64 / steps as f64;
-                let px = x + w + (w * 0.2) * angle.cos();
+                let px = cx_arc + rx * angle.cos();
                 let py = y + h / 2.0 + (h / 2.0) * angle.sin();
                 cmds.push(PathCommand::LineTo(px, py));
             }
+            cmds.push(PathCommand::LineTo(cx_arc, y + h));
             cmds.push(PathCommand::LineTo(x, y + h));
             cmds.push(PathCommand::Close);
             Some(cmds)
@@ -3800,62 +3857,8 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
             cmds.push(PathCommand::Close);
             Some(cmds)
         }
-        // Special Shapes: Smiley Face
-        "smileyFace" => {
-            let cx = x + w / 2.0;
-            let cy = y + h / 2.0;
-            let r = w.min(h) / 2.0;
-            let steps = 48;
-            let mut cmds = Vec::new();
-            // Face circle
-            for i in 0..=steps {
-                let angle = 2.0 * PI * i as f64 / steps as f64;
-                let px = cx + r * angle.cos();
-                let py = cy + r * angle.sin();
-                if i == 0 {
-                    cmds.push(PathCommand::MoveTo(px, py));
-                } else {
-                    cmds.push(PathCommand::LineTo(px, py));
-                }
-            }
-            cmds.push(PathCommand::Close);
-            // Left eye
-            let eye_r = r * 0.08;
-            let eye_y = cy - r * 0.25;
-            for i in 0..=steps / 4 {
-                let angle = 2.0 * PI * i as f64 / (steps / 4) as f64;
-                let px = cx - r * 0.3 + eye_r * angle.cos();
-                let py = eye_y + eye_r * angle.sin();
-                if i == 0 {
-                    cmds.push(PathCommand::MoveTo(px, py));
-                } else {
-                    cmds.push(PathCommand::LineTo(px, py));
-                }
-            }
-            cmds.push(PathCommand::Close);
-            // Right eye
-            for i in 0..=steps / 4 {
-                let angle = 2.0 * PI * i as f64 / (steps / 4) as f64;
-                let px = cx + r * 0.3 + eye_r * angle.cos();
-                let py = eye_y + eye_r * angle.sin();
-                if i == 0 {
-                    cmds.push(PathCommand::MoveTo(px, py));
-                } else {
-                    cmds.push(PathCommand::LineTo(px, py));
-                }
-            }
-            cmds.push(PathCommand::Close);
-            // Smile
-            cmds.push(PathCommand::MoveTo(cx - r * 0.4, cy + r * 0.1));
-            for i in 0..=steps / 4 {
-                let t = i as f64 / (steps / 4) as f64;
-                let angle = PI * 0.2 + PI * 0.6 * t;
-                let px = cx + r * 0.4 * angle.cos();
-                let py = cy + r * 0.4 * angle.sin();
-                cmds.push(PathCommand::LineTo(px, py));
-            }
-            Some(cmds)
-        }
+        // Special Shapes: Smiley Face → generate_preset_paths() で複数パスとして出力
+        "smileyFace" => None,
         // Special Shapes: Sun (circle with rays)
         "sun" => {
             let cx = x + w / 2.0;
@@ -3933,24 +3936,8 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
                 PathCommand::Close,
             ])
         }
-        // Special Shapes: Frame (hollow rectangle)
-        "frame" => {
-            let thickness = w.min(h) * 0.15;
-            Some(vec![
-                // Outer rectangle
-                PathCommand::MoveTo(x, y),
-                PathCommand::LineTo(x + w, y),
-                PathCommand::LineTo(x + w, y + h),
-                PathCommand::LineTo(x, y + h),
-                PathCommand::Close,
-                // Inner rectangle (reverse direction for hole)
-                PathCommand::MoveTo(x + thickness, y + thickness),
-                PathCommand::LineTo(x + thickness, y + h - thickness),
-                PathCommand::LineTo(x + w - thickness, y + h - thickness),
-                PathCommand::LineTo(x + w - thickness, y + thickness),
-                PathCommand::Close,
-            ])
-        }
+        // Special Shapes: Frame → generate_preset_paths() で複数パスとして出力
+        "frame" => None,
         // Special Shapes: Bevel (3D beveled rectangle)
         "bevel" => {
             let bevel = w.min(h) * 0.12;
@@ -4072,11 +4059,2356 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
                 PathCommand::Close,
             ])
         }
+            // === Auto-generated single-path shapes from C++ OOXML definitions ===
+"flowChartCollate" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.5),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.5),
+                PathCommand::Close,
+            ]),
+            "flowChartMagneticTape" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.5, y + h * 1.0),
+                PathCommand::CubicTo(x + w * 0.223858, y + h * 1.0, x + w * 0.0, y + h * 0.776142, x + w * 0.0, y + h * 0.5),
+                PathCommand::CubicTo(x + w * 0.0, y + h * 0.223858, x + w * 0.223858, y + h * 0.0, x + w * 0.5, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.776142, y + h * 0.0, x + w * 1.0, y + h * 0.223858, x + w * 1.0, y + h * 0.5),
+                PathCommand::CubicTo(x + w * 1.0, y + h * 0.632608, x + w * 0.947322, y + h * 0.759785, x + w * 0.853553, y + h * 0.853553),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.853553),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "flowChartPunchedCard" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.2),
+                PathCommand::LineTo(x + w * 0.2, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "flowChartPunchedTape" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.1),
+                PathCommand::CubicTo(x + w * 0.0, y + h * 0.155228, x + w * 0.111929, y + h * 0.2, x + w * 0.25, y + h * 0.2),
+                PathCommand::CubicTo(x + w * 0.388071, y + h * 0.2, x + w * 0.5, y + h * 0.155228, x + w * 0.5, y + h * 0.1),
+                PathCommand::CubicTo(x + w * 0.5, y + h * 0.044772, x + w * 0.611929, y + h * 0.0, x + w * 0.75, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.888071, y + h * 0.0, x + w * 1.0, y + h * 0.044772, x + w * 1.0, y + h * 0.1),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.9),
+                PathCommand::CubicTo(x + w * 1.0, y + h * 0.844772, x + w * 0.888071, y + h * 0.8, x + w * 0.75, y + h * 0.8),
+                PathCommand::CubicTo(x + w * 0.611929, y + h * 0.8, x + w * 0.5, y + h * 0.844772, x + w * 0.5, y + h * 0.9),
+                PathCommand::CubicTo(x + w * 0.5, y + h * 0.955228, x + w * 0.388071, y + h * 1.0, x + w * 0.25, y + h * 1.0),
+                PathCommand::CubicTo(x + w * 0.111929, y + h * 1.0, x + w * 0.0, y + h * 0.955228, x + w * 0.0, y + h * 0.9),
+                PathCommand::Close,
+            ]),
+            "mathPlus" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.13255, y + h * 0.3824),
+                PathCommand::LineTo(x + w * 0.3824, y + h * 0.3824),
+                PathCommand::LineTo(x + w * 0.3824, y + h * 0.13255),
+                PathCommand::LineTo(x + w * 0.6176, y + h * 0.13255),
+                PathCommand::LineTo(x + w * 0.6176, y + h * 0.3824),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.3824),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.6176),
+                PathCommand::LineTo(x + w * 0.6176, y + h * 0.6176),
+                PathCommand::LineTo(x + w * 0.6176, y + h * 0.86745),
+                PathCommand::LineTo(x + w * 0.3824, y + h * 0.86745),
+                PathCommand::LineTo(x + w * 0.3824, y + h * 0.6176),
+                PathCommand::LineTo(x + w * 0.13255, y + h * 0.6176),
+                PathCommand::Close,
+            ]),
+            "mathMinus" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.13255, y + h * 0.3824),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.3824),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.6176),
+                PathCommand::LineTo(x + w * 0.13255, y + h * 0.6176),
+                PathCommand::Close,
+            ]),
+            "mathMultiply" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.157019, y + h * 0.323331),
+                PathCommand::LineTo(x + w * 0.323331, y + h * 0.157019),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.333688),
+                PathCommand::LineTo(x + w * 0.676669, y + h * 0.157019),
+                PathCommand::LineTo(x + w * 0.842981, y + h * 0.323331),
+                PathCommand::LineTo(x + w * 0.666312, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.842981, y + h * 0.676669),
+                PathCommand::LineTo(x + w * 0.676669, y + h * 0.842981),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.666312),
+                PathCommand::LineTo(x + w * 0.323331, y + h * 0.842981),
+                PathCommand::LineTo(x + w * 0.157019, y + h * 0.676669),
+                PathCommand::LineTo(x + w * 0.333688, y + h * 0.5),
+                PathCommand::Close,
+            ]),
+            "mathDivide" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.5, y + h * 0.1179),
+                PathCommand::CubicTo(x + w * 0.564949, y + h * 0.1179, x + w * 0.6176, y + h * 0.170551, x + w * 0.6176, y + h * 0.2355),
+                PathCommand::CubicTo(x + w * 0.6176, y + h * 0.300449, x + w * 0.564949, y + h * 0.3531, x + w * 0.5, y + h * 0.3531),
+                PathCommand::CubicTo(x + w * 0.435051, y + h * 0.3531, x + w * 0.3824, y + h * 0.300449, x + w * 0.3824, y + h * 0.2355),
+                PathCommand::CubicTo(x + w * 0.3824, y + h * 0.170551, x + w * 0.435051, y + h * 0.1179, x + w * 0.5, y + h * 0.1179),
+                PathCommand::Close,
+                PathCommand::MoveTo(x + w * 0.5, y + h * 0.8821),
+                PathCommand::CubicTo(x + w * 0.435051, y + h * 0.8821, x + w * 0.3824, y + h * 0.829449, x + w * 0.3824, y + h * 0.7645),
+                PathCommand::CubicTo(x + w * 0.3824, y + h * 0.699551, x + w * 0.435051, y + h * 0.6469, x + w * 0.5, y + h * 0.6469),
+                PathCommand::CubicTo(x + w * 0.564949, y + h * 0.6469, x + w * 0.6176, y + h * 0.699551, x + w * 0.6176, y + h * 0.7645),
+                PathCommand::CubicTo(x + w * 0.6176, y + h * 0.829449, x + w * 0.564949, y + h * 0.8821, x + w * 0.5, y + h * 0.8821),
+                PathCommand::Close,
+                PathCommand::MoveTo(x + w * 0.13255, y + h * 0.3824),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.3824),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.6176),
+                PathCommand::LineTo(x + w * 0.13255, y + h * 0.6176),
+                PathCommand::Close,
+            ]),
+            "mathEqual" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.13255, y + h * 0.206),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.206),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.4412),
+                PathCommand::LineTo(x + w * 0.13255, y + h * 0.4412),
+                PathCommand::Close,
+                PathCommand::MoveTo(x + w * 0.13255, y + h * 0.5588),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.5588),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.794),
+                PathCommand::LineTo(x + w * 0.13255, y + h * 0.794),
+                PathCommand::Close,
+            ]),
+            "mathNotEqual" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.13255, y + h * 0.206),
+                PathCommand::LineTo(x + w * 0.48186, y + h * 0.206),
+                PathCommand::LineTo(x + w * 0.556838, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.777854, y + h * 0.080443),
+                PathCommand::LineTo(x + w * 0.732155, y + h * 0.206),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.206),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.4412),
+                PathCommand::LineTo(x + w * 0.646549, y + h * 0.4412),
+                PathCommand::LineTo(x + w * 0.603746, y + h * 0.5588),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.5588),
+                PathCommand::LineTo(x + w * 0.86745, y + h * 0.794),
+                PathCommand::LineTo(x + w * 0.51814, y + h * 0.794),
+                PathCommand::LineTo(x + w * 0.443162, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.222146, y + h * 0.919557),
+                PathCommand::LineTo(x + w * 0.267845, y + h * 0.794),
+                PathCommand::LineTo(x + w * 0.13255, y + h * 0.794),
+                PathCommand::LineTo(x + w * 0.13255, y + h * 0.5588),
+                PathCommand::LineTo(x + w * 0.353451, y + h * 0.5588),
+                PathCommand::LineTo(x + w * 0.396254, y + h * 0.4412),
+                PathCommand::LineTo(x + w * 0.13255, y + h * 0.4412),
+                PathCommand::Close,
+            ]),
+            "decagon" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.095492, y + h * 0.190984),
+                PathCommand::LineTo(x + w * 0.345492, y + h * 0.000001),
+                PathCommand::LineTo(x + w * 0.654508, y + h * 0.000001),
+                PathCommand::LineTo(x + w * 0.904508, y + h * 0.190984),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.904508, y + h * 0.809016),
+                PathCommand::LineTo(x + w * 0.654508, y + h * 0.999999),
+                PathCommand::LineTo(x + w * 0.345492, y + h * 0.999999),
+                PathCommand::LineTo(x + w * 0.095492, y + h * 0.809016),
+                PathCommand::Close,
+            ]),
+            "dodecagon" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.366019),
+                PathCommand::LineTo(x + w * 0.133981, y + h * 0.133981),
+                PathCommand::LineTo(x + w * 0.366019, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.633981, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.866019, y + h * 0.133981),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.366019),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.633981),
+                PathCommand::LineTo(x + w * 0.866019, y + h * 0.866019),
+                PathCommand::LineTo(x + w * 0.633981, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.366019, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.133981, y + h * 0.866019),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.633981),
+                PathCommand::Close,
+            ]),
+            "heptagon" => Some(vec![
+                PathCommand::MoveTo(x + w * -0.000003, y + h * 0.643107),
+                PathCommand::LineTo(x + w * 0.099031, y + h * 0.198063),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.900969, y + h * 0.198063),
+                PathCommand::LineTo(x + w * 1.000003, y + h * 0.643107),
+                PathCommand::LineTo(x + w * 0.72252, y + h * 1.000005),
+                PathCommand::LineTo(x + w * 0.27748, y + h * 1.000005),
+                PathCommand::Close,
+            ]),
+            "star7" => Some(vec![
+                PathCommand::MoveTo(x + w * -0.000003, y + h * 0.643107),
+                PathCommand::LineTo(x + w * 0.153988, y + h * 0.445044),
+                PathCommand::LineTo(x + w * 0.099031, y + h * 0.198063),
+                PathCommand::LineTo(x + w * 0.346012, y + h * 0.198063),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.653988, y + h * 0.198063),
+                PathCommand::LineTo(x + w * 0.900969, y + h * 0.198063),
+                PathCommand::LineTo(x + w * 0.846012, y + h * 0.445044),
+                PathCommand::LineTo(x + w * 1.000003, y + h * 0.643107),
+                PathCommand::LineTo(x + w * 0.777479, y + h * 0.753024),
+                PathCommand::LineTo(x + w * 0.72252, y + h * 1.000005),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.890087),
+                PathCommand::LineTo(x + w * 0.27748, y + h * 1.000005),
+                PathCommand::LineTo(x + w * 0.222521, y + h * 0.753024),
+                PathCommand::Close,
+            ]),
+            "diagStripe" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "corner" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.5),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "halfFrame" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.66667, y + h * 0.33333),
+                PathCommand::LineTo(x + w * 0.33333, y + h * 0.33333),
+                PathCommand::LineTo(x + w * 0.33333, y + h * 0.66667),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "nonIsoscelesTrapezoid" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "chord" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.853553, y + h * 0.853553),
+                PathCommand::CubicTo(x + w * 0.658291, y + h * 1.048816, x + w * 0.341709, y + h * 1.048816, x + w * 0.146447, y + h * 0.853553),
+                PathCommand::CubicTo(x + w * -0.048816, y + h * 0.658291, x + w * -0.048816, y + h * 0.341709, x + w * 0.146447, y + h * 0.146447),
+                PathCommand::CubicTo(x + w * 0.240215, y + h * 0.052678, x + w * 0.367392, y + h * 0.0, x + w * 0.5, y + h * 0.0),
+                PathCommand::Close,
+            ]),
+            "teardrop" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                PathCommand::CubicTo(x + w * 0.0, y + h * 0.223858, x + w * 0.223858, y + h * 0.0, x + w * 0.5, y + h * 0.0),
+                PathCommand::QuadTo(x + w * 0.75, y + h * 0.0, x + w * 1.0, y + h * 0.0),
+                PathCommand::QuadTo(x + w * 1.0, y + h * 0.25, x + w * 1.0, y + h * 0.5),
+                PathCommand::CubicTo(x + w * 1.0, y + h * 0.776142, x + w * 0.776142, y + h * 1.0, x + w * 0.5, y + h * 1.0),
+                PathCommand::CubicTo(x + w * 0.223858, y + h * 1.0, x + w * 0.0, y + h * 0.776142, x + w * 0.0, y + h * 0.5),
+                PathCommand::Close,
+            ]),
+            "funnel" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.004866, y + h * 0.284793),
+                PathCommand::CubicTo(x + w * -0.014491, y + h * 0.147062, x + w * 0.193124, y + h * 0.027562, x + w * 0.468587, y + h * 0.017884),
+                PathCommand::CubicTo(x + w * 0.74405, y + h * 0.008205, x + w * 0.983049, y + h * 0.112013, x + w * 1.002406, y + h * 0.249744),
+                PathCommand::CubicTo(x + w * 1.004046, y + h * 0.261413, x + w * 1.004046, y + h * 0.273125, x + w * 1.002406, y + h * 0.284793),
+                PathCommand::LineTo(x + w * 0.623784, y + h * 0.946198),
+                PathCommand::CubicTo(x + w * 0.618944, y + h * 0.980631, x + w * 0.559195, y + h * 1.006583, x + w * 0.490329, y + h * 1.004163),
+                PathCommand::CubicTo(x + w * 0.4282, y + h * 1.001981, x + w * 0.378764, y + h * 0.977263, x + w * 0.374398, y + h * 0.946198),
+                PathCommand::Close,
+                PathCommand::MoveTo(x + w * 0.05, y + h * 0.25),
+                PathCommand::CubicTo(x + w * 0.05, y + h * 0.360457, x + w * 0.251472, y + h * 0.45, x + w * 0.5, y + h * 0.45),
+                PathCommand::CubicTo(x + w * 0.748528, y + h * 0.45, x + w * 0.95, y + h * 0.360457, x + w * 0.95, y + h * 0.25),
+                PathCommand::CubicTo(x + w * 0.95, y + h * 0.139543, x + w * 0.748528, y + h * 0.05, x + w * 0.5, y + h * 0.05),
+                PathCommand::CubicTo(x + w * 0.251472, y + h * 0.05, x + w * 0.05, y + h * 0.139543, x + w * 0.05, y + h * 0.25),
+                PathCommand::Close,
+            ]),
+            "plaque" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.16667),
+                PathCommand::CubicTo(x + w * 0.092049, y + h * 0.16667, x + w * 0.16667, y + h * 0.092049, x + w * 0.16667, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.83333, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.83333, y + h * 0.092049, x + w * 0.907951, y + h * 0.16667, x + w * 1.0, y + h * 0.16667),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.83333),
+                PathCommand::CubicTo(x + w * 0.907951, y + h * 0.83333, x + w * 0.83333, y + h * 0.907951, x + w * 0.83333, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.16667, y + h * 1.0),
+                PathCommand::CubicTo(x + w * 0.16667, y + h * 0.907951, x + w * 0.092049, y + h * 0.83333, x + w * 0.0, y + h * 0.83333),
+                PathCommand::Close,
+            ]),
+            "round1Rect" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.83333, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.925379, y + h * 0.0, x + w * 1.0, y + h * 0.074621, x + w * 1.0, y + h * 0.16667),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "round2DiagRect" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.16667, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 1.0, y + h * 0.0, x + w * 1.0, y + h * 0.0, x + w * 1.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.83333),
+                PathCommand::CubicTo(x + w * 1.0, y + h * 0.925379, x + w * 0.925379, y + h * 1.0, x + w * 0.83333, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::CubicTo(x + w * 0.0, y + h * 1.0, x + w * 0.0, y + h * 1.0, x + w * 0.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.16667),
+                PathCommand::CubicTo(x + w * 0.0, y + h * 0.074621, x + w * 0.074621, y + h * 0.0, x + w * 0.16667, y + h * 0.0),
+                PathCommand::Close,
+            ]),
+            "round2SameRect" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.16667, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.83333, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.925379, y + h * 0.0, x + w * 1.0, y + h * 0.074621, x + w * 1.0, y + h * 0.16667),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::CubicTo(x + w * 1.0, y + h * 1.0, x + w * 1.0, y + h * 1.0, x + w * 1.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::CubicTo(x + w * 0.0, y + h * 1.0, x + w * 0.0, y + h * 1.0, x + w * 0.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.16667),
+                PathCommand::CubicTo(x + w * 0.0, y + h * 0.074621, x + w * 0.074621, y + h * 0.0, x + w * 0.16667, y + h * 0.0),
+                PathCommand::Close,
+            ]),
+            "snip2DiagRect" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.83333, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.16667),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.16667, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.83333),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::Close,
+            ]),
+            "wedgeRectCallout" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.166667, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.166667, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.416667, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.583333),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.583333),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.833333),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.416667, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.29167, y + h * 1.125),
+                PathCommand::LineTo(x + w * 0.166667, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.833333),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.583333),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.583333),
+                PathCommand::Close,
+            ]),
+            "wedgeRoundRectCallout" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.16667),
+                PathCommand::CubicTo(x + w * 0.0, y + h * 0.074621, x + w * 0.074621, y + h * 0.0, x + w * 0.16667, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.166667, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.166667, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.416667, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.83333, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.925379, y + h * 0.0, x + w * 1.0, y + h * 0.074621, x + w * 1.0, y + h * 0.16667),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.583333),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.583333),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.833333),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.83333),
+                PathCommand::CubicTo(x + w * 1.0, y + h * 0.925379, x + w * 0.925379, y + h * 1.0, x + w * 0.83333, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.416667, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.29167, y + h * 1.125),
+                PathCommand::LineTo(x + w * 0.166667, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.16667, y + h * 1.0),
+                PathCommand::CubicTo(x + w * 0.074621, y + h * 1.0, x + w * 0.0, y + h * 0.925379, x + w * 0.0, y + h * 0.83333),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.833333),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.583333),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.583333),
+                PathCommand::Close,
+            ]),
+            "wedgeEllipseCallout" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.29167, y + h * 1.125),
+                PathCommand::LineTo(x + w * 0.254285, y + h * 0.935458),
+                PathCommand::CubicTo(x + w * 0.013788, y + h * 0.799753, x + w * -0.071163, y + h * 0.494782, x + w * 0.064542, y + h * 0.254285),
+                PathCommand::CubicTo(x + w * 0.200247, y + h * 0.013788, x + w * 0.505218, y + h * -0.071163, x + w * 0.745715, y + h * 0.064542),
+                PathCommand::CubicTo(x + w * 0.986212, y + h * 0.200247, x + w * 1.071163, y + h * 0.505218, x + w * 0.935458, y + h * 0.745715),
+                PathCommand::CubicTo(x + w * 0.835295, y + h * 0.923226, x + w * 0.637409, y + h * 1.02217, x + w * 0.435302, y + h * 0.995797),
+                PathCommand::Close,
+            ]),
+            "bentArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.5625),
+                PathCommand::CubicTo(x + w * 0.0, y + h * 0.320875, x + w * 0.195875, y + h * 0.125, x + w * 0.4375, y + h * 0.125),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.125),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.375),
+                PathCommand::LineTo(x + w * 0.4375, y + h * 0.375),
+                PathCommand::CubicTo(x + w * 0.333947, y + h * 0.375, x + w * 0.25, y + h * 0.458947, x + w * 0.25, y + h * 0.5625),
+                PathCommand::LineTo(x + w * 0.25, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "bentUpArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.875, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.875, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "circularArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0625, y + h * 0.5),
+                PathCommand::CubicTo(x + w * 0.0625, y + h * 0.258375, x + w * 0.258375, y + h * 0.0625, x + w * 0.5, y + h * 0.0625),
+                PathCommand::CubicTo(x + w * 0.694511, y + h * 0.0625, x + w * 0.865664, y + h * 0.19092, x + w * 0.92005, y + h * 0.377673),
+                PathCommand::LineTo(x + w * 0.979487, y + h * 0.377673),
+                PathCommand::LineTo(x + w * 0.875, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.729487, y + h * 0.377673),
+                PathCommand::LineTo(x + w * 0.801671, y + h * 0.418449),
+                PathCommand::CubicTo(x + w * 0.756632, y + h * 0.25184, x + w * 0.585057, y + h * 0.153289, x + w * 0.418449, y + h * 0.198329),
+                PathCommand::CubicTo(x + w * 0.282159, y + h * 0.235172, x + w * 0.1875, y + h * 0.358819, x + w * 0.1875, y + h * 0.5),
+                PathCommand::Close,
+            ]),
+            "stripedRightArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.03125, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.03125, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.75),
+                PathCommand::Close,
+                PathCommand::MoveTo(x + w * 0.0625, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.125, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.125, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.0625, y + h * 0.75),
+                PathCommand::Close,
+                PathCommand::MoveTo(x + w * 0.15625, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.15625, y + h * 0.75),
+                PathCommand::Close,
+            ]),
+            "leftCircularArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0625, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.1875, y + h * 0.5),
+                PathCommand::CubicTo(x + w * 0.1875, y + h * 0.672589, x + w * 0.327411, y + h * 0.8125, x + w * 0.5, y + h * 0.8125),
+                PathCommand::CubicTo(x + w * 0.641181, y + h * 0.8125, x + w * 0.764828, y + h * 0.717841, x + w * 0.801671, y + h * 0.581551),
+                PathCommand::LineTo(x + w * 0.729487, y + h * 0.622327),
+                PathCommand::LineTo(x + w * 0.875, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.979487, y + h * 0.622327),
+                PathCommand::LineTo(x + w * 0.92005, y + h * 0.622327),
+                PathCommand::CubicTo(x + w * 0.852491, y + h * 0.854315, x + w * 0.60966, y + h * 0.98761, x + w * 0.377673, y + h * 0.92005),
+                PathCommand::CubicTo(x + w * 0.19092, y + h * 0.865664, x + w * 0.0625, y + h * 0.694511, x + w * 0.0625, y + h * 0.5),
+                PathCommand::Close,
+            ]),
+            "leftRightCircularArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.125, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.07995, y + h * 0.377673),
+                PathCommand::CubicTo(x + w * 0.147509, y + h * 0.145685, x + w * 0.39034, y + h * 0.01239, x + w * 0.622327, y + h * 0.07995),
+                PathCommand::CubicTo(x + w * 0.765937, y + h * 0.121772, x + w * 0.878228, y + h * 0.234063, x + w * 0.92005, y + h * 0.377673),
+                PathCommand::LineTo(x + w * 0.979487, y + h * 0.377673),
+                PathCommand::LineTo(x + w * 0.875, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.729487, y + h * 0.377673),
+                PathCommand::LineTo(x + w * 0.801671, y + h * 0.418449),
+                PathCommand::CubicTo(x + w * 0.756632, y + h * 0.25184, x + w * 0.585057, y + h * 0.153289, x + w * 0.418449, y + h * 0.198329),
+                PathCommand::CubicTo(x + w * 0.311151, y + h * 0.227335, x + w * 0.227335, y + h * 0.311151, x + w * 0.198329, y + h * 0.418449),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                PathCommand::Close,
+            ]),
+            "leftRightArrowCallout" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.375),
+                PathCommand::LineTo(x + w * 0.259385, y + h * 0.375),
+                PathCommand::LineTo(x + w * 0.259385, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.740615, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.740615, y + h * 0.375),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.375),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.25),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.740615, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.740615, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.259385, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.259385, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.75),
+                PathCommand::Close,
+            ]),
+            "leftRightUpArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.375, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.375, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.5),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.75, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.875),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.875),
+                PathCommand::LineTo(x + w * 0.25, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "leftUpArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.875, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.875, y + h * 0.875),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.875),
+                PathCommand::LineTo(x + w * 0.25, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "upArrowCallout" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.35023),
+                PathCommand::LineTo(x + w * 0.375, y + h * 0.35023),
+                PathCommand::LineTo(x + w * 0.375, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.35023),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.35023),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "upDownArrowCallout" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.259385),
+                PathCommand::LineTo(x + w * 0.375, y + h * 0.259385),
+                PathCommand::LineTo(x + w * 0.375, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.259385),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.259385),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.740615),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.740615),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.375, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.375, y + h * 0.740615),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.740615),
+                PathCommand::Close,
+            ]),
+            "downArrowCallout" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.64977),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.64977),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.375, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.375, y + h * 0.64977),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.64977),
+                PathCommand::Close,
+            ]),
+            "leftArrowCallout" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.375),
+                PathCommand::LineTo(x + w * 0.35023, y + h * 0.375),
+                PathCommand::LineTo(x + w * 0.35023, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.35023, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.35023, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.25, y + h * 0.75),
+                PathCommand::Close,
+            ]),
+            "rightArrowCallout" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.64977, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.64977, y + h * 0.375),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.375),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.25),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.64977, y + h * 0.625),
+                PathCommand::LineTo(x + w * 0.64977, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "quadArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.225, y + h * 0.275),
+                PathCommand::LineTo(x + w * 0.225, y + h * 0.3875),
+                PathCommand::LineTo(x + w * 0.3875, y + h * 0.3875),
+                PathCommand::LineTo(x + w * 0.3875, y + h * 0.225),
+                PathCommand::LineTo(x + w * 0.275, y + h * 0.225),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.725, y + h * 0.225),
+                PathCommand::LineTo(x + w * 0.6125, y + h * 0.225),
+                PathCommand::LineTo(x + w * 0.6125, y + h * 0.3875),
+                PathCommand::LineTo(x + w * 0.775, y + h * 0.3875),
+                PathCommand::LineTo(x + w * 0.775, y + h * 0.275),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.775, y + h * 0.725),
+                PathCommand::LineTo(x + w * 0.775, y + h * 0.6125),
+                PathCommand::LineTo(x + w * 0.6125, y + h * 0.6125),
+                PathCommand::LineTo(x + w * 0.6125, y + h * 0.775),
+                PathCommand::LineTo(x + w * 0.725, y + h * 0.775),
+                PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.275, y + h * 0.775),
+                PathCommand::LineTo(x + w * 0.3875, y + h * 0.775),
+                PathCommand::LineTo(x + w * 0.3875, y + h * 0.6125),
+                PathCommand::LineTo(x + w * 0.225, y + h * 0.6125),
+                PathCommand::LineTo(x + w * 0.225, y + h * 0.725),
+                PathCommand::Close,
+            ]),
+            "quadArrowCallout" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.18515, y + h * 0.31485),
+                PathCommand::LineTo(x + w * 0.18515, y + h * 0.407425),
+                PathCommand::LineTo(x + w * 0.259385, y + h * 0.407425),
+                PathCommand::LineTo(x + w * 0.259385, y + h * 0.259385),
+                PathCommand::LineTo(x + w * 0.407425, y + h * 0.259385),
+                PathCommand::LineTo(x + w * 0.407425, y + h * 0.18515),
+                PathCommand::LineTo(x + w * 0.31485, y + h * 0.18515),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.68515, y + h * 0.18515),
+                PathCommand::LineTo(x + w * 0.592575, y + h * 0.18515),
+                PathCommand::LineTo(x + w * 0.592575, y + h * 0.259385),
+                PathCommand::LineTo(x + w * 0.740615, y + h * 0.259385),
+                PathCommand::LineTo(x + w * 0.740615, y + h * 0.407425),
+                PathCommand::LineTo(x + w * 0.81485, y + h * 0.407425),
+                PathCommand::LineTo(x + w * 0.81485, y + h * 0.31485),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.81485, y + h * 0.68515),
+                PathCommand::LineTo(x + w * 0.81485, y + h * 0.592575),
+                PathCommand::LineTo(x + w * 0.740615, y + h * 0.592575),
+                PathCommand::LineTo(x + w * 0.740615, y + h * 0.740615),
+                PathCommand::LineTo(x + w * 0.592575, y + h * 0.740615),
+                PathCommand::LineTo(x + w * 0.592575, y + h * 0.81485),
+                PathCommand::LineTo(x + w * 0.68515, y + h * 0.81485),
+                PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.31485, y + h * 0.81485),
+                PathCommand::LineTo(x + w * 0.407425, y + h * 0.81485),
+                PathCommand::LineTo(x + w * 0.407425, y + h * 0.740615),
+                PathCommand::LineTo(x + w * 0.259385, y + h * 0.740615),
+                PathCommand::LineTo(x + w * 0.259385, y + h * 0.592575),
+                PathCommand::LineTo(x + w * 0.18515, y + h * 0.592575),
+                PathCommand::LineTo(x + w * 0.18515, y + h * 0.68515),
+                PathCommand::Close,
+            ]),
+            "swooshArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::QuadTo(x + w * 0.0, y + h * 0.333333, x + w * 0.83333, y + h * 0.125),
+                PathCommand::LineTo(x + w * 0.819246, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.2),
+                PathCommand::LineTo(x + w * 0.875582, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.861498, y + h * 0.375),
+                PathCommand::QuadTo(x + w * 0.0, y + h * 0.458333, x + w * 0.0, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "uturnArrow" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 1.0),
+                PathCommand::LineTo(x + w * 0.0, y + h * 0.4375),
+                PathCommand::CubicTo(x + w * 0.0, y + h * 0.195875, x + w * 0.195875, y + h * 0.0, x + w * 0.4375, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.4375, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.679125, y + h * 0.0, x + w * 0.875, y + h * 0.195875, x + w * 0.875, y + h * 0.4375),
+                PathCommand::LineTo(x + w * 0.875, y + h * 0.5),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.75, y + h * 0.75),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.625, y + h * 0.4375),
+                PathCommand::CubicTo(x + w * 0.625, y + h * 0.333947, x + w * 0.541053, y + h * 0.25, x + w * 0.4375, y + h * 0.25),
+                PathCommand::LineTo(x + w * 0.4375, y + h * 0.25),
+                PathCommand::CubicTo(x + w * 0.333947, y + h * 0.25, x + w * 0.25, y + h * 0.333947, x + w * 0.25, y + h * 0.4375),
+                PathCommand::LineTo(x + w * 0.25, y + h * 1.0),
+                PathCommand::Close,
+            ]),
+            "bentConnector2" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+            ]),
+            "bentConnector3" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+            ]),
+            "bentConnector4" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.5),
+                PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+            ]),
+            "bentConnector5" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.0),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.5, y + h * 0.5),
+                PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+            ]),
+            "curvedConnector2" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.5, y + h * 0.0, x + w * 1.0, y + h * 0.5, x + w * 1.0, y + h * 1.0),
+            ]),
+            "curvedConnector3" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.25, y + h * 0.0, x + w * 0.5, y + h * 0.25, x + w * 0.5, y + h * 0.5),
+                PathCommand::CubicTo(x + w * 0.5, y + h * 0.75, x + w * 0.75, y + h * 1.0, x + w * 1.0, y + h * 1.0),
+            ]),
+            "curvedConnector4" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.25, y + h * 0.0, x + w * 0.5, y + h * 0.125, x + w * 0.5, y + h * 0.25),
+                PathCommand::CubicTo(x + w * 0.5, y + h * 0.375, x + w * 0.625, y + h * 0.5, x + w * 0.75, y + h * 0.5),
+                PathCommand::CubicTo(x + w * 0.875, y + h * 0.5, x + w * 1.0, y + h * 0.75, x + w * 1.0, y + h * 1.0),
+            ]),
+            "curvedConnector5" => Some(vec![
+                PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                PathCommand::CubicTo(x + w * 0.25, y + h * 0.0, x + w * 0.5, y + h * 0.125, x + w * 0.5, y + h * 0.25),
+                PathCommand::CubicTo(x + w * 0.5, y + h * 0.375, x + w * 0.5, y + h * 0.5, x + w * 0.5, y + h * 0.5),
+                PathCommand::CubicTo(x + w * 0.5, y + h * 0.5, x + w * 0.5, y + h * 0.625, x + w * 0.5, y + h * 0.75),
+                PathCommand::CubicTo(x + w * 0.5, y + h * 0.875, x + w * 0.75, y + h * 1.0, x + w * 1.0, y + h * 1.0),
+            ]),
         _ => None,
     }
 }
 
-/// PPTXメタデータを読み取る
+/// 複数のサブパスを持つプリセットジオメトリを生成
+/// ラスタレンダラーがサブパス（パス内の複数のMoveTo-Close単位）を正しく処理できないため、
+/// 別々のパス要素として返す必要があるジオメトリ用
+pub fn generate_preset_paths(name: &str, x: f64, y: f64, w: f64, h: f64) -> Option<Vec<Vec<crate::converter::PathCommand>>> {
+    use crate::converter::PathCommand;
+    use std::f64::consts::PI;
+
+    match name {
+        // Flowchart: Predefined Process - 外枠 + 内側の垂直線を別パスで出力
+        "flowChartPredefinedProcess" => {
+            let margin = w * 0.1;
+            Some(vec![
+                // 外枠の矩形
+                vec![
+                    PathCommand::MoveTo(x, y),
+                    PathCommand::LineTo(x + w, y),
+                    PathCommand::LineTo(x + w, y + h),
+                    PathCommand::LineTo(x, y + h),
+                    PathCommand::Close,
+                ],
+                // 左側の垂直線
+                vec![
+                    PathCommand::MoveTo(x + margin, y),
+                    PathCommand::LineTo(x + margin, y + h),
+                ],
+                // 右側の垂直線
+                vec![
+                    PathCommand::MoveTo(x + w - margin, y),
+                    PathCommand::LineTo(x + w - margin, y + h),
+                ],
+            ])
+        }
+        // Special Shapes: Smiley Face - 顔の輪郭と目・口を別パスで出力
+        "smileyFace" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let r = w.min(h) / 2.0;
+            let steps = 48;
+
+            // 顔の輪郭
+            let mut face = Vec::new();
+            for i in 0..=steps {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + r * angle.cos();
+                let py = cy + r * angle.sin();
+                if i == 0 {
+                    face.push(PathCommand::MoveTo(px, py));
+                } else {
+                    face.push(PathCommand::LineTo(px, py));
+                }
+            }
+            face.push(PathCommand::Close);
+
+            // 左目
+            let eye_r = r * 0.08;
+            let eye_y = cy - r * 0.25;
+            let eye_steps = steps / 4;
+            let mut left_eye = Vec::new();
+            for i in 0..=eye_steps {
+                let angle = 2.0 * PI * i as f64 / eye_steps as f64;
+                let px = cx - r * 0.3 + eye_r * angle.cos();
+                let py = eye_y + eye_r * angle.sin();
+                if i == 0 {
+                    left_eye.push(PathCommand::MoveTo(px, py));
+                } else {
+                    left_eye.push(PathCommand::LineTo(px, py));
+                }
+            }
+            left_eye.push(PathCommand::Close);
+
+            // 右目
+            let mut right_eye = Vec::new();
+            for i in 0..=eye_steps {
+                let angle = 2.0 * PI * i as f64 / eye_steps as f64;
+                let px = cx + r * 0.3 + eye_r * angle.cos();
+                let py = eye_y + eye_r * angle.sin();
+                if i == 0 {
+                    right_eye.push(PathCommand::MoveTo(px, py));
+                } else {
+                    right_eye.push(PathCommand::LineTo(px, py));
+                }
+            }
+            right_eye.push(PathCommand::Close);
+
+            // 口（スマイル弧）
+            let mut smile = Vec::new();
+            smile.push(PathCommand::MoveTo(cx - r * 0.4, cy + r * 0.1));
+            let smile_steps = steps / 4;
+            for i in 0..=smile_steps {
+                let t = i as f64 / smile_steps as f64;
+                let angle = PI * 0.2 + PI * 0.6 * t;
+                let px = cx + r * 0.4 * angle.cos();
+                let py = cy + r * 0.4 * angle.sin();
+                smile.push(PathCommand::LineTo(px, py));
+            }
+
+            Some(vec![face, left_eye, right_eye, smile])
+        }
+        // Special Shapes: Frame (hollow rectangle) - 外枠と内枠を別パスで出力
+        "frame" => {
+            let thickness = w.min(h) * 0.15;
+            Some(vec![
+                // 外枠
+                vec![
+                    PathCommand::MoveTo(x, y),
+                    PathCommand::LineTo(x + w, y),
+                    PathCommand::LineTo(x + w, y + h),
+                    PathCommand::LineTo(x, y + h),
+                    PathCommand::Close,
+                ],
+                // 内枠（ストロークのみ、フィルなし）
+                vec![
+                    PathCommand::MoveTo(x + thickness, y + thickness),
+                    PathCommand::LineTo(x + w - thickness, y + thickness),
+                    PathCommand::LineTo(x + w - thickness, y + h - thickness),
+                    PathCommand::LineTo(x + thickness, y + h - thickness),
+                    PathCommand::Close,
+                ],
+            ])
+        }
+            // === Auto-generated multi-path shapes from C++ OOXML definitions ===
+"flowChartInternalStorage" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 1.0),
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.125),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "flowChartMagneticDrum" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.166667, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.833333, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.925381, y + h * 0.0, x + w * 1.0, y + h * 0.223858, x + w * 1.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.776142, x + w * 0.925381, y + h * 1.0, x + w * 0.833333, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.166667, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.074619, y + h * 1.0, x + w * 0.0, y + h * 0.776142, x + w * 0.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.223858, x + w * 0.074619, y + h * 0.0, x + w * 0.166667, y + h * 0.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.833333, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.741286, y + h * 1.0, x + w * 0.666667, y + h * 0.776142, x + w * 0.666667, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.666667, y + h * 0.223858, x + w * 0.741286, y + h * 0.0, x + w * 0.833333, y + h * 0.0),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.166667, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.833333, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.925381, y + h * 0.0, x + w * 1.0, y + h * 0.223858, x + w * 1.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.776142, x + w * 0.925381, y + h * 1.0, x + w * 0.833333, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.166667, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.074619, y + h * 1.0, x + w * 0.0, y + h * 0.776142, x + w * 0.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.223858, x + w * 0.074619, y + h * 0.0, x + w * 0.166667, y + h * 0.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "flowChartOfflineStorage" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.4, y + h * 0.8),
+                    PathCommand::LineTo(x + w * 0.6, y + h * 0.8),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "flowChartOr" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.223858, x + w * 0.223858, y + h * 0.0, x + w * 0.5, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.776142, y + h * 0.0, x + w * 1.0, y + h * 0.223858, x + w * 1.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.776142, x + w * 0.776142, y + h * 1.0, x + w * 0.5, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.223858, y + h * 1.0, x + w * 0.0, y + h * 0.776142, x + w * 0.0, y + h * 0.5),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.5, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.223858, x + w * 0.223858, y + h * 0.0, x + w * 0.5, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.776142, y + h * 0.0, x + w * 1.0, y + h * 0.223858, x + w * 1.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.776142, x + w * 0.776142, y + h * 1.0, x + w * 0.5, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.223858, y + h * 1.0, x + w * 0.0, y + h * 0.776142, x + w * 0.0, y + h * 0.5),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "flowChartSummingJunction" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.223858, x + w * 0.223858, y + h * 0.0, x + w * 0.5, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.776142, y + h * 0.0, x + w * 1.0, y + h * 0.223858, x + w * 1.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.776142, x + w * 0.776142, y + h * 1.0, x + w * 0.5, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.223858, y + h * 1.0, x + w * 0.0, y + h * 0.776142, x + w * 0.0, y + h * 0.5),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.146447, y + h * 0.146447),
+                    PathCommand::LineTo(x + w * 0.853553, y + h * 0.853553),
+                    PathCommand::MoveTo(x + w * 0.853553, y + h * 0.146447),
+                    PathCommand::LineTo(x + w * 0.146447, y + h * 0.853553),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.223858, x + w * 0.223858, y + h * 0.0, x + w * 0.5, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.776142, y + h * 0.0, x + w * 1.0, y + h * 0.223858, x + w * 1.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.776142, x + w * 0.776142, y + h * 1.0, x + w * 0.5, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.223858, y + h * 1.0, x + w * 0.0, y + h * 0.776142, x + w * 0.0, y + h * 0.5),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "chartPlus" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.5, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.5),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "chartStar" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::MoveTo(x + w * 0.5, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 1.0),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "chartX" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "bracePair" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.16666, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.120638, y + h * 1.0, x + w * 0.08333, y + h * 0.962692, x + w * 0.08333, y + h * 0.91667),
+                    PathCommand::LineTo(x + w * 0.08333, y + h * 0.58333),
+                    PathCommand::CubicTo(x + w * 0.08333, y + h * 0.537308, x + w * 0.046022, y + h * 0.5, x + w * 0.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.046022, y + h * 0.5, x + w * 0.08333, y + h * 0.462692, x + w * 0.08333, y + h * 0.41667),
+                    PathCommand::LineTo(x + w * 0.08333, y + h * 0.08333),
+                    PathCommand::CubicTo(x + w * 0.08333, y + h * 0.037308, x + w * 0.120638, y + h * 0.0, x + w * 0.16666, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.83334, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.879362, y + h * 0.0, x + w * 0.91667, y + h * 0.037308, x + w * 0.91667, y + h * 0.08333),
+                    PathCommand::LineTo(x + w * 0.91667, y + h * 0.41667),
+                    PathCommand::CubicTo(x + w * 0.91667, y + h * 0.462692, x + w * 0.953978, y + h * 0.5, x + w * 1.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.953978, y + h * 0.5, x + w * 0.91667, y + h * 0.537308, x + w * 0.91667, y + h * 0.58333),
+                    PathCommand::LineTo(x + w * 0.91667, y + h * 0.91667),
+                    PathCommand::CubicTo(x + w * 0.91667, y + h * 0.962692, x + w * 0.879362, y + h * 1.0, x + w * 0.83334, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.16666, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.120638, y + h * 1.0, x + w * 0.08333, y + h * 0.962692, x + w * 0.08333, y + h * 0.91667),
+                    PathCommand::LineTo(x + w * 0.08333, y + h * 0.58333),
+                    PathCommand::CubicTo(x + w * 0.08333, y + h * 0.537308, x + w * 0.046022, y + h * 0.5, x + w * 0.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.046022, y + h * 0.5, x + w * 0.08333, y + h * 0.462692, x + w * 0.08333, y + h * 0.41667),
+                    PathCommand::LineTo(x + w * 0.08333, y + h * 0.08333),
+                    PathCommand::CubicTo(x + w * 0.08333, y + h * 0.037308, x + w * 0.120638, y + h * 0.0, x + w * 0.16666, y + h * 0.0),
+                    PathCommand::MoveTo(x + w * 0.83334, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.879362, y + h * 0.0, x + w * 0.91667, y + h * 0.037308, x + w * 0.91667, y + h * 0.08333),
+                    PathCommand::LineTo(x + w * 0.91667, y + h * 0.41667),
+                    PathCommand::CubicTo(x + w * 0.91667, y + h * 0.462692, x + w * 0.953978, y + h * 0.5, x + w * 1.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.953978, y + h * 0.5, x + w * 0.91667, y + h * 0.537308, x + w * 0.91667, y + h * 0.58333),
+                    PathCommand::LineTo(x + w * 0.91667, y + h * 0.91667),
+                    PathCommand::CubicTo(x + w * 0.91667, y + h * 0.962692, x + w * 0.879362, y + h * 1.0, x + w * 0.83334, y + h * 1.0),
+                ]);
+                Some(paths)
+            }
+            "bracketPair" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.16667),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.074621, x + w * 0.074621, y + h * 0.0, x + w * 0.16667, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.83333, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.925379, y + h * 0.0, x + w * 1.0, y + h * 0.074621, x + w * 1.0, y + h * 0.16667),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.83333),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.925379, x + w * 0.925379, y + h * 1.0, x + w * 0.83333, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.16667, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.074621, y + h * 1.0, x + w * 0.0, y + h * 0.925379, x + w * 0.0, y + h * 0.83333),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.16667, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.074621, y + h * 1.0, x + w * 0.0, y + h * 0.925379, x + w * 0.0, y + h * 0.83333),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 0.16667),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.074621, x + w * 0.074621, y + h * 0.0, x + w * 0.16667, y + h * 0.0),
+                    PathCommand::MoveTo(x + w * 0.83333, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.925379, y + h * 0.0, x + w * 1.0, y + h * 0.074621, x + w * 1.0, y + h * 0.16667),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.83333),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.925379, x + w * 0.925379, y + h * 1.0, x + w * 0.83333, y + h * 1.0),
+                ]);
+                Some(paths)
+            }
+            "leftBrace" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.723858, y + h * 1.0, x + w * 0.5, y + h * 0.962692, x + w * 0.5, y + h * 0.91667),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.58333),
+                    PathCommand::CubicTo(x + w * 0.5, y + h * 0.537308, x + w * 0.276142, y + h * 0.5, x + w * 0.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.276142, y + h * 0.5, x + w * 0.5, y + h * 0.462692, x + w * 0.5, y + h * 0.41667),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.08333),
+                    PathCommand::CubicTo(x + w * 0.5, y + h * 0.037308, x + w * 0.723858, y + h * 0.0, x + w * 1.0, y + h * 0.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.723858, y + h * 1.0, x + w * 0.5, y + h * 0.962692, x + w * 0.5, y + h * 0.91667),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.58333),
+                    PathCommand::CubicTo(x + w * 0.5, y + h * 0.537308, x + w * 0.276142, y + h * 0.5, x + w * 0.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.276142, y + h * 0.5, x + w * 0.5, y + h * 0.462692, x + w * 0.5, y + h * 0.41667),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.08333),
+                    PathCommand::CubicTo(x + w * 0.5, y + h * 0.037308, x + w * 0.723858, y + h * 0.0, x + w * 1.0, y + h * 0.0),
+                ]);
+                Some(paths)
+            }
+            "rightBrace" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.276142, y + h * 0.0, x + w * 0.5, y + h * 0.037308, x + w * 0.5, y + h * 0.08333),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.41667),
+                    PathCommand::CubicTo(x + w * 0.5, y + h * 0.462692, x + w * 0.723858, y + h * 0.5, x + w * 1.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.723858, y + h * 0.5, x + w * 0.5, y + h * 0.537308, x + w * 0.5, y + h * 0.58333),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.91667),
+                    PathCommand::CubicTo(x + w * 0.5, y + h * 0.962692, x + w * 0.276142, y + h * 1.0, x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.276142, y + h * 0.0, x + w * 0.5, y + h * 0.037308, x + w * 0.5, y + h * 0.08333),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.41667),
+                    PathCommand::CubicTo(x + w * 0.5, y + h * 0.462692, x + w * 0.723858, y + h * 0.5, x + w * 1.0, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.723858, y + h * 0.5, x + w * 0.5, y + h * 0.537308, x + w * 0.5, y + h * 0.58333),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.91667),
+                    PathCommand::CubicTo(x + w * 0.5, y + h * 0.962692, x + w * 0.276142, y + h * 1.0, x + w * 0.0, y + h * 1.0),
+                ]);
+                Some(paths)
+            }
+            "leftBracket" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.447715, y + h * 1.0, x + w * 0.0, y + h * 0.962692, x + w * 0.0, y + h * 0.91667),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 0.08333),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.037308, x + w * 0.447715, y + h * 0.0, x + w * 1.0, y + h * 0.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.447715, y + h * 1.0, x + w * 0.0, y + h * 0.962692, x + w * 0.0, y + h * 0.91667),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 0.08333),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.037308, x + w * 0.447715, y + h * 0.0, x + w * 1.0, y + h * 0.0),
+                ]);
+                Some(paths)
+            }
+            "rightBracket" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.552285, y + h * 0.0, x + w * 1.0, y + h * 0.037308, x + w * 1.0, y + h * 0.08333),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.91667),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.962692, x + w * 0.552285, y + h * 1.0, x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.552285, y + h * 0.0, x + w * 1.0, y + h * 0.037308, x + w * 1.0, y + h * 0.08333),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.91667),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.962692, x + w * 0.552285, y + h * 1.0, x + w * 0.0, y + h * 1.0),
+                ]);
+                Some(paths)
+            }
+            "callout1" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.38333, y + h * 1.125),
+                ]);
+                Some(paths)
+            }
+            "callout2" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.46667, y + h * 1.125),
+                ]);
+                Some(paths)
+            }
+            "callout3" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 1.0),
+                    PathCommand::LineTo(x + w * -0.08333, y + h * 1.12963),
+                ]);
+                Some(paths)
+            }
+            "borderCallout1" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.38333, y + h * 1.125),
+                ]);
+                Some(paths)
+            }
+            "borderCallout2" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.46667, y + h * 1.125),
+                ]);
+                Some(paths)
+            }
+            "borderCallout3" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 1.0),
+                    PathCommand::LineTo(x + w * -0.08333, y + h * 1.12963),
+                ]);
+                Some(paths)
+            }
+            "accentCallout1" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.0),
+                    PathCommand::Close,
+                    PathCommand::LineTo(x + w * -0.08333, y + h * 1.0),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.38333, y + h * 1.125),
+                ]);
+                Some(paths)
+            }
+            "accentCallout2" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.0),
+                    PathCommand::Close,
+                    PathCommand::LineTo(x + w * -0.08333, y + h * 1.0),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.46667, y + h * 1.125),
+                ]);
+                Some(paths)
+            }
+            "accentCallout3" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.0),
+                    PathCommand::Close,
+                    PathCommand::LineTo(x + w * -0.08333, y + h * 1.0),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 1.0),
+                    PathCommand::LineTo(x + w * -0.08333, y + h * 1.12963),
+                ]);
+                Some(paths)
+            }
+            "accentBorderCallout1" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.0),
+                    PathCommand::Close,
+                    PathCommand::LineTo(x + w * -0.08333, y + h * 1.0),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.38333, y + h * 1.125),
+                ]);
+                Some(paths)
+            }
+            "accentBorderCallout2" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.0),
+                    PathCommand::Close,
+                    PathCommand::LineTo(x + w * -0.08333, y + h * 1.0),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.46667, y + h * 1.125),
+                ]);
+                Some(paths)
+            }
+            "accentBorderCallout3" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.0),
+                    PathCommand::Close,
+                    PathCommand::LineTo(x + w * -0.08333, y + h * 1.0),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * -0.08333, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * -0.16667, y + h * 1.0),
+                    PathCommand::LineTo(x + w * -0.08333, y + h * 1.12963),
+                ]);
+                Some(paths)
+            }
+            "curvedDownArrow" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.75, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.490077, y + h * 0.75),
+                    PathCommand::LineTo(x + w * 0.615077, y + h * 0.75),
+                    PathCommand::CubicTo(x + w * 0.555711, y + h * 0.520077, x + w * 0.467372, y + h * 0.38695, x + w * 0.374169, y + h * 0.38695),
+                    PathCommand::LineTo(x + w * 0.5625, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.655703, y + h * 0.0, x + w * 0.744042, y + h * 0.133127, x + w * 0.803408, y + h * 0.36305),
+                    PathCommand::LineTo(x + w * 0.990077, y + h * 0.75),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.4375, y + h * 0.083485),
+                    PathCommand::CubicTo(x + w * 0.282664, y + h * 0.151061, x + w * 0.16723, y + h * 0.57425, x + w * 0.16723, y + h * 1.074312),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.447715, x + w * 0.139911, y + h * 0.0, x + w * 0.3125, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.326625, y + h * 0.0, x + w * 0.340734, y + h * 0.003065, x + w * 0.35473, y + h * 0.009173),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.4375, y + h * 0.083485),
+                    PathCommand::CubicTo(x + w * 0.282664, y + h * 0.151061, x + w * 0.16723, y + h * 0.57425, x + w * 0.16723, y + h * 1.074312),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.447715, x + w * 0.139911, y + h * 0.0, x + w * 0.3125, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.5625, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.655703, y + h * 0.0, x + w * 0.744042, y + h * 0.133127, x + w * 0.803408, y + h * 0.36305),
+                    PathCommand::LineTo(x + w * 0.990077, y + h * 0.75),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.490077, y + h * 0.75),
+                    PathCommand::LineTo(x + w * 0.615077, y + h * 0.75),
+                    PathCommand::CubicTo(x + w * 0.555711, y + h * 0.520077, x + w * 0.467372, y + h * 0.38695, x + w * 0.374169, y + h * 0.38695),
+                ]);
+                Some(paths)
+            }
+            "curvedLeftArrow" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.75),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.490077),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.615077),
+                    PathCommand::CubicTo(x + w * 0.443609, y + h * 0.565087, x + w * 0.569939, y + h * 0.494162, x + w * 0.603877, y + h * 0.416399),
+                    PathCommand::CubicTo(x + w * 0.650644, y + h * 0.523555, x + w * 0.516791, y + h * 0.630651, x + w * 0.25, y + h * 0.699536),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.990077),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 1.0, y + h * 0.5625),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.389911, x + w * 0.552285, y + h * 0.25, x + w * 0.0, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.552285, y + h * 0.0, x + w * 1.0, y + h * 0.139911, x + w * 1.0, y + h * 0.3125),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 1.0, y + h * 0.5625),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.389911, x + w * 0.552285, y + h * 0.25, x + w * 0.0, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.552285, y + h * 0.0, x + w * 1.0, y + h * 0.139911, x + w * 1.0, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.5625),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.655703, x + w * 0.866873, y + h * 0.744042, x + w * 0.63695, y + h * 0.803408),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.990077),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 0.75),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.490077),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.615077),
+                    PathCommand::CubicTo(x + w * 0.443609, y + h * 0.565087, x + w * 0.569939, y + h * 0.494162, x + w * 0.603877, y + h * 0.416399),
+                ]);
+                Some(paths)
+            }
+            "curvedRightArrow" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.3125),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.405703, x + w * 0.133127, y + h * 0.494042, x + w * 0.36305, y + h * 0.553408),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 0.490077),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.75),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 0.990077),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 0.865077),
+                    PathCommand::CubicTo(x + w * 0.520077, y + h * 0.805711, x + w * 0.38695, y + h * 0.717372, x + w * 0.38695, y + h * 0.624169),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 1.0, y + h * 0.25),
+                    PathCommand::CubicTo(x + w * 0.499938, y + h * 0.25, x + w * 0.076749, y + h * 0.365434, x + w * 0.009173, y + h * 0.52027),
+                    PathCommand::CubicTo(x + w * -0.06546, y + h * 0.349264, x + w * 0.317646, y + h * 0.19173, x + w * 0.864865, y + h * 0.168407),
+                    PathCommand::CubicTo(x + w * 0.909651, y + h * 0.166498, x + w * 0.954799, y + h * 0.165541, x + w * 1.0, y + h * 0.165541),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.3125),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.405703, x + w * 0.133127, y + h * 0.494042, x + w * 0.36305, y + h * 0.553408),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 0.490077),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.75),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 0.990077),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 0.865077),
+                    PathCommand::CubicTo(x + w * 0.520077, y + h * 0.805711, x + w * 0.38695, y + h * 0.717372, x + w * 0.38695, y + h * 0.624169),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 0.3125),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.139911, x + w * 0.447715, y + h * 0.0, x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.25),
+                    PathCommand::CubicTo(x + w * 0.499938, y + h * 0.25, x + w * 0.076749, y + h * 0.365434, x + w * 0.009173, y + h * 0.52027),
+                ]);
+                Some(paths)
+            }
+            "curvedUpArrow" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.75, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.990077, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.865077, y + h * 0.25),
+                    PathCommand::CubicTo(x + w * 0.796192, y + h * 0.516791, x + w * 0.689096, y + h * 0.650644, x + w * 0.581939, y + h * 0.603877),
+                    PathCommand::CubicTo(x + w * 0.659702, y + h * 0.569939, x + w * 0.730628, y + h * 0.443609, x + w * 0.780617, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.490077, y + h * 0.25),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.3125, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.139911, y + h * 1.0, x + w * 0.0, y + h * 0.552285, x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.25, y + h * 0.552285, x + w * 0.389911, y + h * 1.0, x + w * 0.5625, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.4375, y + h * 0.916515),
+                    PathCommand::CubicTo(x + w * 0.515263, y + h * 0.882577, x + w * 0.586188, y + h * 0.756247, x + w * 0.636178, y + h * 0.562638),
+                    PathCommand::LineTo(x + w * 0.490077, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.990077, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.865077, y + h * 0.25),
+                    PathCommand::CubicTo(x + w * 0.805711, y + h * 0.479923, x + w * 0.717372, y + h * 0.61305, x + w * 0.624169, y + h * 0.61305),
+                    PathCommand::LineTo(x + w * 0.3125, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.139911, y + h * 1.0, x + w * 0.0, y + h * 0.552285, x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.25, y + h * 0.552285, x + w * 0.389911, y + h * 1.0, x + w * 0.5625, y + h * 1.0),
+                ]);
+                Some(paths)
+            }
+            "leftRightRibbon" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.416665),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.166665),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.166665),
+                    PathCommand::CubicTo(x + w * 0.517259, y + h * 0.166665, x + w * 0.53125, y + h * 0.18532, x + w * 0.53125, y + h * 0.208333),
+                    PathCommand::CubicTo(x + w * 0.53125, y + h * 0.231345, x + w * 0.517259, y + h * 0.25, x + w * 0.5, y + h * 0.25),
+                    PathCommand::CubicTo(x + w * 0.482741, y + h * 0.25, x + w * 0.46875, y + h * 0.268655, x + w * 0.46875, y + h * 0.291668),
+                    PathCommand::CubicTo(x + w * 0.46875, y + h * 0.31468, x + w * 0.482741, y + h * 0.333335, x + w * 0.5, y + h * 0.333335),
+                    PathCommand::LineTo(x + w * 0.53125, y + h * 0.333335),
+                    PathCommand::LineTo(x + w * 0.53125, y + h * 0.16667),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.583335),
+                    PathCommand::LineTo(x + w * 0.53125, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.53125, y + h * 0.833335),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.833335),
+                    PathCommand::CubicTo(x + w * 0.482741, y + h * 0.833335, x + w * 0.46875, y + h * 0.81468, x + w * 0.46875, y + h * 0.791668),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.666665),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.666665),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.83333),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.53125, y + h * 0.208333),
+                    PathCommand::CubicTo(x + w * 0.53125, y + h * 0.231345, x + w * 0.517259, y + h * 0.25, x + w * 0.5, y + h * 0.25),
+                    PathCommand::CubicTo(x + w * 0.482741, y + h * 0.25, x + w * 0.46875, y + h * 0.268655, x + w * 0.46875, y + h * 0.291668),
+                    PathCommand::CubicTo(x + w * 0.46875, y + h * 0.31468, x + w * 0.482741, y + h * 0.333335, x + w * 0.5, y + h * 0.333335),
+                    PathCommand::LineTo(x + w * 0.53125, y + h * 0.333335),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.416665),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.166665),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.166665),
+                    PathCommand::CubicTo(x + w * 0.517259, y + h * 0.166665, x + w * 0.53125, y + h * 0.18532, x + w * 0.53125, y + h * 0.208333),
+                    PathCommand::CubicTo(x + w * 0.53125, y + h * 0.231345, x + w * 0.517259, y + h * 0.25, x + w * 0.5, y + h * 0.25),
+                    PathCommand::CubicTo(x + w * 0.482741, y + h * 0.25, x + w * 0.46875, y + h * 0.268655, x + w * 0.46875, y + h * 0.291668),
+                    PathCommand::CubicTo(x + w * 0.46875, y + h * 0.31468, x + w * 0.482741, y + h * 0.333335, x + w * 0.5, y + h * 0.333335),
+                    PathCommand::LineTo(x + w * 0.53125, y + h * 0.333335),
+                    PathCommand::LineTo(x + w * 0.53125, y + h * 0.16667),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.583335),
+                    PathCommand::LineTo(x + w * 0.53125, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.53125, y + h * 0.833335),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.833335),
+                    PathCommand::CubicTo(x + w * 0.482741, y + h * 0.833335, x + w * 0.46875, y + h * 0.81468, x + w * 0.46875, y + h * 0.791668),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.666665),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.666665),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.83333),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.53125, y + h * 0.208333),
+                    PathCommand::LineTo(x + w * 0.53125, y + h * 0.333335),
+                    PathCommand::MoveTo(x + w * 0.46875, y + h * 0.291667),
+                    PathCommand::LineTo(x + w * 0.46875, y + h * 0.666665),
+                ]);
+                Some(paths)
+            }
+            "cube" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.75, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.75),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 0.25),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.75),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::MoveTo(x + w * 0.75, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.75, y + h * 1.0),
+                ]);
+                Some(paths)
+            }
+            "horizontalScroll" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 1.0, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.097018, x + w * 0.972018, y + h * 0.125, x + w * 0.9375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.9375, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 0.9375, y + h * 0.079759, x + w * 0.923509, y + h * 0.09375, x + w * 0.90625, y + h * 0.09375),
+                    PathCommand::CubicTo(x + w * 0.888991, y + h * 0.09375, x + w * 0.875, y + h * 0.079759, x + w * 0.875, y + h * 0.0625),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.0625, y + h * 0.125),
+                    PathCommand::CubicTo(x + w * 0.027982, y + h * 0.125, x + w * 0.0, y + h * 0.152982, x + w * 0.0, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 0.9375),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.972018, x + w * 0.027982, y + h * 1.0, x + w * 0.0625, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.097018, y + h * 1.0, x + w * 0.125, y + h * 0.972018, x + w * 0.125, y + h * 0.9375),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.9375, y + h * 0.875),
+                    PathCommand::CubicTo(x + w * 0.972018, y + h * 0.875, x + w * 1.0, y + h * 0.847018, x + w * 1.0, y + h * 0.8125),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.0625, y + h * 0.25),
+                    PathCommand::CubicTo(x + w * 0.097018, y + h * 0.25, x + w * 0.125, y + h * 0.222018, x + w * 0.125, y + h * 0.1875),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.170241, x + w * 0.111009, y + h * 0.15625, x + w * 0.09375, y + h * 0.15625),
+                    PathCommand::CubicTo(x + w * 0.076491, y + h * 0.15625, x + w * 0.0625, y + h * 0.170241, x + w * 0.0625, y + h * 0.1875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0625, y + h * 0.25),
+                    PathCommand::CubicTo(x + w * 0.097018, y + h * 0.25, x + w * 0.125, y + h * 0.222018, x + w * 0.125, y + h * 0.1875),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.170241, x + w * 0.111009, y + h * 0.15625, x + w * 0.09375, y + h * 0.15625),
+                    PathCommand::CubicTo(x + w * 0.076491, y + h * 0.15625, x + w * 0.0625, y + h * 0.170241, x + w * 0.0625, y + h * 0.1875),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.9375, y + h * 0.125),
+                    PathCommand::CubicTo(x + w * 0.972018, y + h * 0.125, x + w * 1.0, y + h * 0.097018, x + w * 1.0, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.027982, x + w * 0.972018, y + h * 0.0, x + w * 0.9375, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.902982, y + h * 0.0, x + w * 0.875, y + h * 0.027982, x + w * 0.875, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 0.875, y + h * 0.079759, x + w * 0.888991, y + h * 0.09375, x + w * 0.90625, y + h * 0.09375),
+                    PathCommand::CubicTo(x + w * 0.923509, y + h * 0.09375, x + w * 0.9375, y + h * 0.079759, x + w * 0.9375, y + h * 0.0625),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.1875),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.152982, x + w * 0.027982, y + h * 0.125, x + w * 0.0625, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 0.875, y + h * 0.027982, x + w * 0.902982, y + h * 0.0, x + w * 0.9375, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.972018, y + h * 0.0, x + w * 1.0, y + h * 0.027982, x + w * 1.0, y + h * 0.0625),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.8125),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.847018, x + w * 0.972018, y + h * 0.875, x + w * 0.9375, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.9375),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.972018, x + w * 0.097018, y + h * 1.0, x + w * 0.0625, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.027982, y + h * 1.0, x + w * 0.0, y + h * 0.972018, x + w * 0.0, y + h * 0.9375),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.9375, y + h * 0.125),
+                    PathCommand::CubicTo(x + w * 0.972018, y + h * 0.125, x + w * 1.0, y + h * 0.097018, x + w * 1.0, y + h * 0.0625),
+                    PathCommand::MoveTo(x + w * 0.9375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.9375, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 0.9375, y + h * 0.079759, x + w * 0.923509, y + h * 0.09375, x + w * 0.90625, y + h * 0.09375),
+                    PathCommand::CubicTo(x + w * 0.888991, y + h * 0.09375, x + w * 0.875, y + h * 0.079759, x + w * 0.875, y + h * 0.0625),
+                    PathCommand::MoveTo(x + w * 0.0625, y + h * 0.25),
+                    PathCommand::LineTo(x + w * 0.0625, y + h * 0.1875),
+                    PathCommand::CubicTo(x + w * 0.0625, y + h * 0.170241, x + w * 0.076491, y + h * 0.15625, x + w * 0.09375, y + h * 0.15625),
+                    PathCommand::CubicTo(x + w * 0.111009, y + h * 0.15625, x + w * 0.125, y + h * 0.170241, x + w * 0.125, y + h * 0.1875),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.222018, x + w * 0.097018, y + h * 0.25, x + w * 0.0625, y + h * 0.25),
+                    PathCommand::CubicTo(x + w * 0.027982, y + h * 0.25, x + w * 0.0, y + h * 0.222018, x + w * 0.0, y + h * 0.1875),
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.1875),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                ]);
+                Some(paths)
+            }
+            "verticalScroll" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0625, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.097018, y + h * 1.0, x + w * 0.125, y + h * 0.972018, x + w * 0.125, y + h * 0.9375),
+                    PathCommand::LineTo(x + w * 0.0625, y + h * 0.9375),
+                    PathCommand::CubicTo(x + w * 0.079759, y + h * 0.9375, x + w * 0.09375, y + h * 0.923509, x + w * 0.09375, y + h * 0.90625),
+                    PathCommand::CubicTo(x + w * 0.09375, y + h * 0.888991, x + w * 0.079759, y + h * 0.875, x + w * 0.0625, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.027982, x + w * 0.152982, y + h * 0.0, x + w * 0.1875, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.9375, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.972018, y + h * 0.0, x + w * 1.0, y + h * 0.027982, x + w * 1.0, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.097018, x + w * 0.972018, y + h * 0.125, x + w * 0.9375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.9375),
+                    PathCommand::CubicTo(x + w * 0.875, y + h * 0.972018, x + w * 0.847018, y + h * 1.0, x + w * 0.8125, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.25, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 0.25, y + h * 0.097018, x + w * 0.222018, y + h * 0.125, x + w * 0.1875, y + h * 0.125),
+                    PathCommand::CubicTo(x + w * 0.170241, y + h * 0.125, x + w * 0.15625, y + h * 0.111009, x + w * 0.15625, y + h * 0.09375),
+                    PathCommand::CubicTo(x + w * 0.15625, y + h * 0.076491, x + w * 0.170241, y + h * 0.0625, x + w * 0.1875, y + h * 0.0625),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.25, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 0.25, y + h * 0.097018, x + w * 0.222018, y + h * 0.125, x + w * 0.1875, y + h * 0.125),
+                    PathCommand::CubicTo(x + w * 0.170241, y + h * 0.125, x + w * 0.15625, y + h * 0.111009, x + w * 0.15625, y + h * 0.09375),
+                    PathCommand::CubicTo(x + w * 0.15625, y + h * 0.076491, x + w * 0.170241, y + h * 0.0625, x + w * 0.1875, y + h * 0.0625),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.9375),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.972018, x + w * 0.097018, y + h * 1.0, x + w * 0.0625, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.027982, y + h * 1.0, x + w * 0.0, y + h * 0.972018, x + w * 0.0, y + h * 0.9375),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.902982, x + w * 0.027982, y + h * 0.875, x + w * 0.0625, y + h * 0.875),
+                    PathCommand::CubicTo(x + w * 0.079759, y + h * 0.875, x + w * 0.09375, y + h * 0.888991, x + w * 0.09375, y + h * 0.90625),
+                    PathCommand::CubicTo(x + w * 0.09375, y + h * 0.923509, x + w * 0.079759, y + h * 0.9375, x + w * 0.0625, y + h * 0.9375),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.027982, x + w * 0.152982, y + h * 0.0, x + w * 0.1875, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.9375, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.972018, y + h * 0.0, x + w * 1.0, y + h * 0.027982, x + w * 1.0, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 1.0, y + h * 0.097018, x + w * 0.972018, y + h * 0.125, x + w * 0.9375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.9375),
+                    PathCommand::CubicTo(x + w * 0.875, y + h * 0.972018, x + w * 0.847018, y + h * 1.0, x + w * 0.8125, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0625, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.027982, y + h * 1.0, x + w * 0.0, y + h * 0.972018, x + w * 0.0, y + h * 0.9375),
+                    PathCommand::CubicTo(x + w * 0.0, y + h * 0.902982, x + w * 0.027982, y + h * 0.875, x + w * 0.0625, y + h * 0.875),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.1875, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.222018, y + h * 0.0, x + w * 0.25, y + h * 0.027982, x + w * 0.25, y + h * 0.0625),
+                    PathCommand::CubicTo(x + w * 0.25, y + h * 0.097018, x + w * 0.222018, y + h * 0.125, x + w * 0.1875, y + h * 0.125),
+                    PathCommand::CubicTo(x + w * 0.170241, y + h * 0.125, x + w * 0.15625, y + h * 0.111009, x + w * 0.15625, y + h * 0.09375),
+                    PathCommand::CubicTo(x + w * 0.15625, y + h * 0.076491, x + w * 0.170241, y + h * 0.0625, x + w * 0.1875, y + h * 0.0625),
+                    PathCommand::LineTo(x + w * 0.25, y + h * 0.0625),
+                    PathCommand::MoveTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.1875, y + h * 0.125),
+                    PathCommand::MoveTo(x + w * 0.0625, y + h * 0.875),
+                    PathCommand::CubicTo(x + w * 0.079759, y + h * 0.875, x + w * 0.09375, y + h * 0.888991, x + w * 0.09375, y + h * 0.90625),
+                    PathCommand::CubicTo(x + w * 0.09375, y + h * 0.923509, x + w * 0.079759, y + h * 0.9375, x + w * 0.0625, y + h * 0.9375),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.9375),
+                    PathCommand::MoveTo(x + w * 0.0625, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.097018, y + h * 1.0, x + w * 0.125, y + h * 0.972018, x + w * 0.125, y + h * 0.9375),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                ]);
+                Some(paths)
+            }
+            "squareTabs" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.070711, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.070711, y + h * 0.070711),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 0.070711),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.929289),
+                    PathCommand::LineTo(x + w * 0.070711, y + h * 0.929289),
+                    PathCommand::LineTo(x + w * 0.070711, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.929289, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.070711),
+                    PathCommand::LineTo(x + w * 0.929289, y + h * 0.070711),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.929289, y + h * 0.929289),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.929289),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.929289, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "cornerTabs" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.070711, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 0.070711),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.929289),
+                    PathCommand::LineTo(x + w * 0.070711, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.929289, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.070711),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 1.0, y + h * 0.929289),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.929289, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "plaqueTabs" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 0.070711, y + h * 0.0),
+                    PathCommand::CubicTo(x + w * 0.070711, y + h * 0.039052, x + w * 0.039052, y + h * 0.070711, x + w * 0.0, y + h * 0.070711),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.929289),
+                    PathCommand::CubicTo(x + w * 0.039052, y + h * 0.929289, x + w * 0.070711, y + h * 0.960948, x + w * 0.070711, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.070711),
+                    PathCommand::CubicTo(x + w * 0.960948, y + h * 0.070711, x + w * 0.929289, y + h * 0.039052, x + w * 0.929289, y + h * 0.0),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.929289, y + h * 1.0),
+                    PathCommand::CubicTo(x + w * 0.929289, y + h * 0.960948, x + w * 0.960948, y + h * 0.929289, x + w * 1.0, y + h * 0.929289),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "actionButtonBackPrevious" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "actionButtonBeginning" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.3125, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.875),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.21875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.21875, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.3125, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.875),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.21875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.21875, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.3125, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.875),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.21875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.21875, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.125),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "actionButtonDocument" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.21875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.21875, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.21875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.21875, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.59375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.3125),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.21875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.21875, y + h * 0.875),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.78125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.125),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "actionButtonEnd" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.6875, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.78125, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.6875, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.78125, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.6875, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.125),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.78125, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "actionButtonForwardNext" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.875, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.875, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.875, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.125),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "actionButtonInformation" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.5, y + h * 0.125),
+                    PathCommand::CubicTo(x + w * 0.707107, y + h * 0.125, x + w * 0.875, y + h * 0.292893, x + w * 0.875, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.875, y + h * 0.707107, x + w * 0.707107, y + h * 0.875, x + w * 0.5, y + h * 0.875),
+                    PathCommand::CubicTo(x + w * 0.292893, y + h * 0.875, x + w * 0.125, y + h * 0.707107, x + w * 0.125, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.292893, x + w * 0.292893, y + h * 0.125, x + w * 0.5, y + h * 0.125),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.5, y + h * 0.125),
+                    PathCommand::CubicTo(x + w * 0.707107, y + h * 0.125, x + w * 0.875, y + h * 0.292893, x + w * 0.875, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.875, y + h * 0.707107, x + w * 0.707107, y + h * 0.875, x + w * 0.5, y + h * 0.875),
+                    PathCommand::CubicTo(x + w * 0.292893, y + h * 0.875, x + w * 0.125, y + h * 0.707107, x + w * 0.125, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.292893, x + w * 0.292893, y + h * 0.125, x + w * 0.5, y + h * 0.125),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.5, y + h * 0.148438),
+                    PathCommand::CubicTo(x + w * 0.538833, y + h * 0.148438, x + w * 0.570312, y + h * 0.179917, x + w * 0.570312, y + h * 0.21875),
+                    PathCommand::CubicTo(x + w * 0.570312, y + h * 0.257583, x + w * 0.538833, y + h * 0.289062, x + w * 0.5, y + h * 0.289062),
+                    PathCommand::CubicTo(x + w * 0.461167, y + h * 0.289062, x + w * 0.429688, y + h * 0.257583, x + w * 0.429688, y + h * 0.21875),
+                    PathCommand::CubicTo(x + w * 0.429688, y + h * 0.179917, x + w * 0.461167, y + h * 0.148438, x + w * 0.5, y + h * 0.148438),
+                    PathCommand::MoveTo(x + w * 0.359375, y + h * 0.359375),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.40625),
+                    PathCommand::LineTo(x + w * 0.429688, y + h * 0.40625),
+                    PathCommand::LineTo(x + w * 0.429688, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.78125),
+                    PathCommand::LineTo(x + w * 0.640625, y + h * 0.78125),
+                    PathCommand::LineTo(x + w * 0.640625, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.570312, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.570312, y + h * 0.359375),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.5, y + h * 0.148438),
+                    PathCommand::CubicTo(x + w * 0.538833, y + h * 0.148438, x + w * 0.570312, y + h * 0.179917, x + w * 0.570312, y + h * 0.21875),
+                    PathCommand::CubicTo(x + w * 0.570312, y + h * 0.257583, x + w * 0.538833, y + h * 0.289062, x + w * 0.5, y + h * 0.289062),
+                    PathCommand::CubicTo(x + w * 0.461167, y + h * 0.289062, x + w * 0.429688, y + h * 0.257583, x + w * 0.429688, y + h * 0.21875),
+                    PathCommand::CubicTo(x + w * 0.429688, y + h * 0.179917, x + w * 0.461167, y + h * 0.148438, x + w * 0.5, y + h * 0.148438),
+                    PathCommand::MoveTo(x + w * 0.359375, y + h * 0.359375),
+                    PathCommand::LineTo(x + w * 0.570312, y + h * 0.359375),
+                    PathCommand::LineTo(x + w * 0.570312, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.640625, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.640625, y + h * 0.78125),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.78125),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.429688, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.429688, y + h * 0.40625),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.40625),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.5, y + h * 0.125),
+                    PathCommand::CubicTo(x + w * 0.707107, y + h * 0.125, x + w * 0.875, y + h * 0.292893, x + w * 0.875, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.875, y + h * 0.707107, x + w * 0.707107, y + h * 0.875, x + w * 0.5, y + h * 0.875),
+                    PathCommand::CubicTo(x + w * 0.292893, y + h * 0.875, x + w * 0.125, y + h * 0.707107, x + w * 0.125, y + h * 0.5),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.292893, x + w * 0.292893, y + h * 0.125, x + w * 0.5, y + h * 0.125),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.5, y + h * 0.148438),
+                    PathCommand::CubicTo(x + w * 0.538833, y + h * 0.148438, x + w * 0.570312, y + h * 0.179917, x + w * 0.570312, y + h * 0.21875),
+                    PathCommand::CubicTo(x + w * 0.570312, y + h * 0.257583, x + w * 0.538833, y + h * 0.289062, x + w * 0.5, y + h * 0.289062),
+                    PathCommand::CubicTo(x + w * 0.461167, y + h * 0.289062, x + w * 0.429688, y + h * 0.257583, x + w * 0.429688, y + h * 0.21875),
+                    PathCommand::CubicTo(x + w * 0.429688, y + h * 0.179917, x + w * 0.461167, y + h * 0.148438, x + w * 0.5, y + h * 0.148438),
+                    PathCommand::MoveTo(x + w * 0.359375, y + h * 0.359375),
+                    PathCommand::LineTo(x + w * 0.570312, y + h * 0.359375),
+                    PathCommand::LineTo(x + w * 0.570312, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.640625, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.640625, y + h * 0.78125),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.78125),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.429688, y + h * 0.734375),
+                    PathCommand::LineTo(x + w * 0.429688, y + h * 0.40625),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.40625),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "actionButtonMovie" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.308333),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.456771),
+                    PathCommand::LineTo(x + w * 0.175521, y + h * 0.456771),
+                    PathCommand::LineTo(x + w * 0.191146, y + h * 0.439826),
+                    PathCommand::LineTo(x + w * 0.205729, y + h * 0.439826),
+                    PathCommand::LineTo(x + w * 0.205729, y + h * 0.666389),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.666389),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.588264),
+                    PathCommand::LineTo(x + w * 0.796354, y + h * 0.588264),
+                    PathCommand::LineTo(x + w * 0.840104, y + h * 0.63125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.63125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.355208),
+                    PathCommand::LineTo(x + w * 0.840104, y + h * 0.355208),
+                    PathCommand::LineTo(x + w * 0.809896, y + h * 0.385139),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.385139),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.355208),
+                    PathCommand::LineTo(x + w * 0.685937, y + h * 0.323958),
+                    PathCommand::LineTo(x + w * 0.191146, y + h * 0.323958),
+                    PathCommand::LineTo(x + w * 0.175521, y + h * 0.308333),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.308333),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.456771),
+                    PathCommand::LineTo(x + w * 0.175521, y + h * 0.456771),
+                    PathCommand::LineTo(x + w * 0.191146, y + h * 0.439826),
+                    PathCommand::LineTo(x + w * 0.205729, y + h * 0.439826),
+                    PathCommand::LineTo(x + w * 0.205729, y + h * 0.666389),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.666389),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.588264),
+                    PathCommand::LineTo(x + w * 0.796354, y + h * 0.588264),
+                    PathCommand::LineTo(x + w * 0.840104, y + h * 0.63125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.63125),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.355208),
+                    PathCommand::LineTo(x + w * 0.840104, y + h * 0.355208),
+                    PathCommand::LineTo(x + w * 0.809896, y + h * 0.385139),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.385139),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.355208),
+                    PathCommand::LineTo(x + w * 0.685937, y + h * 0.323958),
+                    PathCommand::LineTo(x + w * 0.191146, y + h * 0.323958),
+                    PathCommand::LineTo(x + w * 0.175521, y + h * 0.308333),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.308333),
+                    PathCommand::LineTo(x + w * 0.175521, y + h * 0.308333),
+                    PathCommand::LineTo(x + w * 0.191146, y + h * 0.323958),
+                    PathCommand::LineTo(x + w * 0.685937, y + h * 0.323958),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.355208),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.385139),
+                    PathCommand::LineTo(x + w * 0.809896, y + h * 0.385139),
+                    PathCommand::LineTo(x + w * 0.840104, y + h * 0.355208),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.355208),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.63125),
+                    PathCommand::LineTo(x + w * 0.840104, y + h * 0.63125),
+                    PathCommand::LineTo(x + w * 0.796354, y + h * 0.588264),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.588264),
+                    PathCommand::LineTo(x + w * 0.715625, y + h * 0.666389),
+                    PathCommand::LineTo(x + w * 0.205729, y + h * 0.666389),
+                    PathCommand::LineTo(x + w * 0.205729, y + h * 0.439826),
+                    PathCommand::LineTo(x + w * 0.191146, y + h * 0.439826),
+                    PathCommand::LineTo(x + w * 0.175521, y + h * 0.456771),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.456771),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "actionButtonReturn" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.875, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.6875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.59375),
+                    PathCommand::CubicTo(x + w * 0.59375, y + h * 0.645527, x + w * 0.551777, y + h * 0.6875, x + w * 0.5, y + h * 0.6875),
+                    PathCommand::LineTo(x + w * 0.40625, y + h * 0.6875),
+                    PathCommand::CubicTo(x + w * 0.354473, y + h * 0.6875, x + w * 0.3125, y + h * 0.645527, x + w * 0.3125, y + h * 0.59375),
+                    PathCommand::LineTo(x + w * 0.3125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.59375),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.74908, x + w * 0.25092, y + h * 0.875, x + w * 0.40625, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.875),
+                    PathCommand::CubicTo(x + w * 0.65533, y + h * 0.875, x + w * 0.78125, y + h * 0.74908, x + w * 0.78125, y + h * 0.59375),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.3125),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.875, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.6875, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.59375),
+                    PathCommand::CubicTo(x + w * 0.59375, y + h * 0.645527, x + w * 0.551777, y + h * 0.6875, x + w * 0.5, y + h * 0.6875),
+                    PathCommand::LineTo(x + w * 0.40625, y + h * 0.6875),
+                    PathCommand::CubicTo(x + w * 0.354473, y + h * 0.6875, x + w * 0.3125, y + h * 0.645527, x + w * 0.3125, y + h * 0.59375),
+                    PathCommand::LineTo(x + w * 0.3125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.59375),
+                    PathCommand::CubicTo(x + w * 0.125, y + h * 0.74908, x + w * 0.25092, y + h * 0.875, x + w * 0.40625, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.875),
+                    PathCommand::CubicTo(x + w * 0.65533, y + h * 0.875, x + w * 0.78125, y + h * 0.74908, x + w * 0.78125, y + h * 0.59375),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.3125),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.875, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.78125, y + h * 0.59375),
+                    PathCommand::CubicTo(x + w * 0.78125, y + h * 0.74908, x + w * 0.65533, y + h * 0.875, x + w * 0.5, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.40625, y + h * 0.875),
+                    PathCommand::CubicTo(x + w * 0.25092, y + h * 0.875, x + w * 0.125, y + h * 0.74908, x + w * 0.125, y + h * 0.59375),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.3125, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.3125, y + h * 0.59375),
+                    PathCommand::CubicTo(x + w * 0.3125, y + h * 0.645527, x + w * 0.354473, y + h * 0.6875, x + w * 0.40625, y + h * 0.6875),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.6875),
+                    PathCommand::CubicTo(x + w * 0.551777, y + h * 0.6875, x + w * 0.59375, y + h * 0.645527, x + w * 0.59375, y + h * 0.59375),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.5, y + h * 0.3125),
+                    PathCommand::LineTo(x + w * 0.6875, y + h * 0.125),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+            "actionButtonSound" => {
+                let mut paths = Vec::new();
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.359375),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.640625),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.640625),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.359375),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.359375),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.640625),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.640625),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.359375),
+                    PathCommand::Close,
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.125, y + h * 0.359375),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.359375),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.125),
+                    PathCommand::LineTo(x + w * 0.59375, y + h * 0.875),
+                    PathCommand::LineTo(x + w * 0.359375, y + h * 0.640625),
+                    PathCommand::LineTo(x + w * 0.125, y + h * 0.640625),
+                    PathCommand::Close,
+                    PathCommand::MoveTo(x + w * 0.6875, y + h * 0.359375),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.21875),
+                    PathCommand::MoveTo(x + w * 0.6875, y + h * 0.5),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.5),
+                    PathCommand::MoveTo(x + w * 0.6875, y + h * 0.640625),
+                    PathCommand::LineTo(x + w * 0.875, y + h * 0.78125),
+                ]);
+                paths.push(vec![
+                    PathCommand::MoveTo(x + w * 0.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 0.0),
+                    PathCommand::LineTo(x + w * 1.0, y + h * 1.0),
+                    PathCommand::LineTo(x + w * 0.0, y + h * 1.0),
+                    PathCommand::Close,
+                ]);
+                Some(paths)
+            }
+        _ => None,
+    }
+}
 fn read_pptx_metadata(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>) -> Metadata {
     let mut metadata = Metadata::default();
 

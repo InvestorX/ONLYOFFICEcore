@@ -51,7 +51,10 @@ impl<'a> PdfWriter<'a> {
 
     /// ドキュメントをPDFバイト列に変換
     pub fn render(&mut self, doc: &Document) -> Vec<u8> {
-        let has_font = self.font_manager.has_any_font();
+        // ab_glyphでパース可能なフォントデータを見つけてコピー
+        // CIDToGIDMapとフォント埋め込みの両方で同じフォントを使用することを保証
+        let usable_font_data: Option<Vec<u8>> = find_usable_font_data(self.font_manager);
+        let has_font = usable_font_data.is_some();
 
         // IDを事前割り当て
         let catalog_id = self.alloc_id();
@@ -68,8 +71,8 @@ impl<'a> PdfWriter<'a> {
         // CIDToGIDMap用のID
         let cid_to_gid_map_id = self.alloc_id();
 
-        // フォント埋め込み用のID（フォントデータがある場合）
-        let font_file_id = if has_font {
+        // フォント埋め込み用のID（パース可能なフォントデータがある場合のみ）
+        let font_file_id = if usable_font_data.is_some() {
             Some(self.alloc_id())
         } else {
             None
@@ -122,8 +125,9 @@ impl<'a> PdfWriter<'a> {
         );
 
         // CIDToGIDMapストリームを生成（フォントのcmapテーブルに基づく）
+        // usable_font_dataと同じデータを使用してマッピングの一致を保証
         {
-            let cid_to_gid_data = self.build_cid_to_gid_map();
+            let cid_to_gid_data = Self::build_cid_to_gid_map_from_data(usable_font_data.as_deref());
             let mut stream_data = format!(
                 "<< /Length {} >>\nstream\n",
                 cid_to_gid_data.len()
@@ -178,9 +182,9 @@ impl<'a> PdfWriter<'a> {
                 .to_vec(),
         );
 
-        // フォントファイルの埋め込み（外部フォントまたは内蔵フォント）
-        if let (Some(ff_id), Some(font_data)) =
-            (font_file_id, self.font_manager.best_font_data())
+        // フォントファイルの埋め込み（CIDToGIDMapと同じusable_font_dataを使用）
+        if let (Some(ff_id), Some(ref font_data)) =
+            (font_file_id, &usable_font_data)
         {
             self.add_object(
                 ff_id,
@@ -418,7 +422,7 @@ impl<'a> PdfWriter<'a> {
                     width,
                     table,
                 } => {
-                    self.render_table(&mut stream, *x, *y, *width, table, page.height);
+                    self.render_table(&mut stream, *x, *y, *width, table, page.height, has_font);
                 }
                 PageElement::Path {
                     commands,
@@ -519,11 +523,25 @@ impl<'a> PdfWriter<'a> {
         if text.is_empty() {
             return;
         }
+        // 制御文字をサニタイズしてPDFテキストオペレータの破損を防止
+        // - 改行・復帰・タブはスペースに正規化して単語境界を保持
+        // - それ以外の制御文字は除去
+        let clean_text: String = text
+            .chars()
+            .map(|c| match c {
+                '\n' | '\r' | '\t' => ' ',
+                _ => c,
+            })
+            .filter(|c| !c.is_control())
+            .collect();
+        if clean_text.is_empty() {
+            return;
+        }
         let pdf_y = page_height - y - style.font_size;
 
         if has_font {
             // CIDフォント（/F1）: UTF-16BEヘックス文字列で全Unicode対応
-            let hex_text = self.text_to_pdf_hex(text);
+            let hex_text = self.text_to_pdf_hex(&clean_text);
 
             stream.extend_from_slice(
                 format!(
@@ -541,7 +559,7 @@ impl<'a> PdfWriter<'a> {
         } else {
             // フォールバック（/F2 Helvetica）: WinAnsiEncoding（Latin-1）
             // 非ASCII文字を '?' に置換してLatin-1の範囲内に収める
-            let safe_text = text_to_winansi(text);
+            let safe_text = text_to_winansi(&clean_text);
             let escaped = pdf_escape_string(&safe_text);
 
             stream.extend_from_slice(
@@ -569,9 +587,11 @@ impl<'a> PdfWriter<'a> {
         width: f64,
         table: &Table,
         page_height: f64,
+        has_font: bool,
     ) {
-        let row_height = 20.0;
+        let base_row_height = 20.0;
         let padding = 4.0;
+        let line_spacing = 1.3;
         let num_cols = table.column_widths.len().max(1);
         let col_width = if table.column_widths.is_empty() {
             width / num_cols as f64
@@ -579,8 +599,28 @@ impl<'a> PdfWriter<'a> {
             0.0 // 個別幅を使用
         };
 
+        // 各行の高さを事前計算（セルごとの行高見積もりの最大に基づく動的高さ）
+        let row_heights: Vec<f64> = table.rows.iter().map(|row| {
+            let row_max_height = row
+                .iter()
+                .map(|cell| {
+                    let lines = if cell.text.is_empty() {
+                        1
+                    } else {
+                        cell.text.split('\n').count().max(1)
+                    };
+                    let fs = cell.style.font_size;
+                    fs * line_spacing * lines as f64 + padding * 2.0
+                })
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(base_row_height);
+            row_max_height.max(base_row_height)
+        }).collect();
+
+        let mut row_y_offset = 0.0f64;
         for (row_idx, row) in table.rows.iter().enumerate() {
-            let row_y = y + row_idx as f64 * row_height;
+            let row_y = y + row_y_offset;
+            let rh = row_heights[row_idx];
             let mut cell_x = x;
 
             for (col_idx, cell) in row.iter().enumerate() {
@@ -591,33 +631,67 @@ impl<'a> PdfWriter<'a> {
                 };
 
                 // セル枠線
-                let py = page_height - row_y - row_height;
+                let py = page_height - row_y - rh;
                 stream.extend_from_slice(
                     format!(
                         "0.8 0.8 0.8 RG\n0.5 w\n{} {} {} {} re\nS\n",
-                        cell_x, py, cw, row_height
+                        cell_x, py, cw, rh
                     )
                     .as_bytes(),
                 );
 
-                // セルテキスト
+                // セルテキスト（複数行対応）
                 if !cell.text.is_empty() {
-                    let hex_text = self.text_to_pdf_hex(&cell.text);
-                    let text_y = page_height - row_y - row_height + padding;
-                    stream.extend_from_slice(
-                        format!(
-                            "BT\n/F1 {} Tf\n0 0 0 rg\n{} {} Td\n<{}> Tj\nET\n",
-                            cell.style.font_size,
-                            cell_x + padding,
-                            text_y,
-                            hex_text
-                        )
-                        .as_bytes(),
-                    );
+                    let fs = cell.style.font_size;
+                    let font_name = if has_font { "F1" } else { "F2" };
+                    let lines: Vec<&str> = cell.text.split('\n').collect();
+                    for (line_idx, line) in lines.iter().enumerate() {
+                        let text_y = page_height - row_y - padding - fs
+                            - (line_idx as f64 * fs * line_spacing);
+                        if line.is_empty() {
+                            // 空行はYオフセットだけ進める（描画はスキップ）
+                            continue;
+                        }
+                        if has_font {
+                            let hex_text = self.text_to_pdf_hex(line);
+                            stream.extend_from_slice(
+                                format!(
+                                    "BT\n/{} {} Tf\n{} {} {} rg\n{} {} Td\n<{}> Tj\nET\n",
+                                    font_name,
+                                    fs,
+                                    cell.style.color.r as f64 / 255.0,
+                                    cell.style.color.g as f64 / 255.0,
+                                    cell.style.color.b as f64 / 255.0,
+                                    cell_x + padding,
+                                    text_y,
+                                    hex_text
+                                )
+                                .as_bytes(),
+                            );
+                        } else {
+                            let safe_text = text_to_winansi(line);
+                            let escaped = pdf_escape_string(&safe_text);
+                            stream.extend_from_slice(
+                                format!(
+                                    "BT\n/{} {} Tf\n{} {} {} rg\n{} {} Td\n({}) Tj\nET\n",
+                                    font_name,
+                                    fs,
+                                    cell.style.color.r as f64 / 255.0,
+                                    cell.style.color.g as f64 / 255.0,
+                                    cell.style.color.b as f64 / 255.0,
+                                    cell_x + padding,
+                                    text_y,
+                                    escaped
+                                )
+                                .as_bytes(),
+                            );
+                        }
+                    }
                 }
 
                 cell_x += cw;
             }
+            row_y_offset += rh;
         }
     }
 
@@ -892,13 +966,14 @@ impl<'a> PdfWriter<'a> {
 
     /// CIDToGIDMapストリームを生成
     /// フォントのcmapテーブルからUnicodeコードポイント(CID)→グリフID(GID)のマッピングを構築
-    fn build_cid_to_gid_map(&self) -> Vec<u8> {
+    /// 指定されたフォントデータを使用（find_usable_font_dataで検証済みのもの）
+    fn build_cid_to_gid_map_from_data(font_data: Option<&[u8]>) -> Vec<u8> {
         use ab_glyph::{Font, FontRef};
         // 65536 entries × 2 bytes each = 131072 bytes
         let mut map = vec![0u8; 65536 * 2];
 
-        if let Some(font_data) = self.font_manager.best_font_data() {
-            if let Ok(font) = FontRef::try_from_slice(font_data) {
+        if let Some(data) = font_data {
+            if let Ok(font) = FontRef::try_from_slice(data) {
                 for code_point in 0u32..=0xFFFF {
                     if let Some(ch) = char::from_u32(code_point) {
                         let glyph_id = font.glyph_id(ch);
@@ -1013,12 +1088,12 @@ impl<'a> PdfWriter<'a> {
         output.extend_from_slice(b"0000000000 65535 f \n");
 
         for id in 1..max_id {
-            let offset = offsets
-                .iter()
-                .find(|(oid, _)| *oid == id)
-                .map(|(_, off)| *off)
-                .unwrap_or(0);
-            output.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+            if let Some((_, off)) = offsets.iter().find(|(oid, _)| *oid == id) {
+                output.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes());
+            } else {
+                // オブジェクトが存在しないIDはfree(f)エントリとして出力
+                output.extend_from_slice(b"0000000000 00000 f \n");
+            }
         }
 
         // トレーラー
@@ -1035,12 +1110,41 @@ impl<'a> PdfWriter<'a> {
     }
 }
 
-/// テキストをWinAnsiEncoding（Latin-1）に変換
-/// CIDフォントが利用できない場合に、Helveticaフォールバック用に使用
+/// ab_glyphでパース可能なフォントデータを見つける（フリー関数版）
+/// 外部フォント → 内蔵フォントの順に試行し、パース可能な最初のフォントデータをコピーして返す
+fn find_usable_font_data(font_manager: &FontManager) -> Option<Vec<u8>> {
+    use ab_glyph::FontRef;
+    // まず外部フォントを順に試す
+    for (_, data) in font_manager.external_fonts_iter() {
+        if !data.is_empty() && FontRef::try_from_slice(data).is_ok() {
+            return Some(data.to_vec());
+        }
+    }
+    // 内蔵フォントを試す
+    if let Some(data) = font_manager.builtin_japanese_font() {
+        if FontRef::try_from_slice(data).is_ok() {
+            return Some(data.to_vec());
+        }
+    }
+    // LINE Seed JPを試す
+    if let Some(data) = font_manager.builtin_line_seed_jp() {
+        if FontRef::try_from_slice(data).is_ok() {
+            return Some(data.to_vec());
+        }
+    }
+    None
+}
+
+/// テキストをASCIIに制限してHelveticaフォールバック用に使用
+/// PDF literal string `(...)` はバイト列として解釈されるため、
+/// Rust String（UTF-8）のマルチバイト文字を直接書くと破損する。
+/// Helvetica（/WinAnsiEncoding）は基本的にLatin-1相当だが、
+/// UTF-8→Latin-1変換の複雑さを避け、安全にASCII範囲に制限する。
 fn text_to_winansi(text: &str) -> String {
     text.chars()
         .map(|c| {
-            if u32::from(c) <= 0xFF {
+            let cp = u32::from(c);
+            if cp >= 0x20 && cp <= 0x7E {
                 c
             } else {
                 '?'
