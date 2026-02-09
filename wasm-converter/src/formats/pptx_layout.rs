@@ -2635,6 +2635,13 @@ fn render_slide_page(
                         }
                     }
                 }
+                // 未実装のプリセットジオメトリは矩形に置き換えない
+                // rect/ellipse/未指定の場合のみ矩形・楕円でフォールバック描画する
+                let is_rect_or_default = match &shape.preset_geometry {
+                    None => true,
+                    Some(name) => name == "rect",
+                };
+
                 if !shape_rendered {
                     if is_ellipse {
                         // Render ellipse with image fill using elliptical clipping
@@ -2669,8 +2676,8 @@ fn render_slide_page(
                             });
                             shape_rendered = true;
                         }
-                    } else {
-                        // Standard rectangle or rounded rect rendering
+                    } else if is_rect_or_default {
+                        // 矩形フォールバックは実際の rect または未指定ジオメトリのみ
                         match &shape.fill {
                             Some(ShapeFill::Solid(color)) => {
                                 page.elements.push(PageElement::Rect {
@@ -2705,11 +2712,13 @@ fn render_slide_page(
                             }
                             None => {}
                         }
+                        shape_rendered = true;
                     }
+                    // else: 未実装のプリセットジオメトリ → 矩形での置換を行わない
                 } // end shape fill
 
-                // Shape outline (skip if already rendered as a path with stroke)
-                if !shape_rendered {
+                // Shape outline (rect/defaultの場合のみ矩形ストロークを描画)
+                if !shape_rendered && is_rect_or_default {
                     if let Some((color, width)) = shape.outline {
                         page.elements.push(PageElement::Rect {
                             x: shape.x,
