@@ -220,6 +220,7 @@ fn render_slide_to_page(slide_number: usize, texts: &[SlideText]) -> Page {
         fill: None,
         stroke: Some(Color::rgb(200, 200, 200)),
         stroke_width: 1.0,
+        rotation_deg: 0.0,
     });
 
     let mut y = margin + 40.0;
