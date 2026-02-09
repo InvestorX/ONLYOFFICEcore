@@ -147,7 +147,11 @@ fn parse_chart_xml(xml: &str) -> Option<ChartDef> {
                         current_chart_type_name = "lineChart".to_string();
                         in_chart_type = true;
                     }
-                    "scatterChart" | "bubbleChart" => {
+                    "scatterChart" => {
+                        current_chart_type_name = "scatterChart".to_string();
+                        in_chart_type = true;
+                    }
+                    "bubbleChart" => {
                         current_chart_type_name = "bubbleChart".to_string();
                         in_chart_type = true;
                     }

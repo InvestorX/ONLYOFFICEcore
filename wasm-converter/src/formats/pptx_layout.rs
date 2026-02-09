@@ -1354,7 +1354,7 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             }
                         }
                     } else {
-                        cur_bullet = Some("\u{2022}".to_string()); // •
+                        cur_bullet = Some(DEFAULT_BULLET.to_string());
                     }
                 }
 
@@ -1726,13 +1726,16 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
 }
 
 /// XML要素から色を解析（テーマカラー対応版）
+/// デフォルトのbullet文字
+const DEFAULT_BULLET: char = '\u{2022}'; // •
+
 /// Wingdings/Symbol等のPUA文字を標準Unicodeのbullet文字に正規化
 fn normalize_bullet_char(raw: &str) -> String {
-    let ch = raw.chars().next().unwrap_or('\u{2022}');
+    let ch = raw.chars().next().unwrap_or(DEFAULT_BULLET);
     let cp = ch as u32;
     // Wingdings PUA (F020-F0FF) and common symbol ranges
     let mapped = match cp {
-        0xF06C | 0xF0B7 | 0xF076 => '\u{2022}', // bullet •
+        0xF06C | 0xF0B7 | 0xF076 => DEFAULT_BULLET, // bullet •
         0xF06E | 0xF0A8 => '\u{25A0}',            // black square ■
         0xF0D8 | 0xF0E0 => '\u{25B6}',            // right triangle ▶
         0xF0FC => '\u{2713}',                       // check mark ✓
@@ -1741,7 +1744,7 @@ fn normalize_bullet_char(raw: &str) -> String {
         0xF0B2 => '\u{25C6}',                       // black diamond ◆
         0xF0D6 => '\u{279C}',                       // right arrow ➜
         0xF0E8 => '\u{2605}',                       // black star ★
-        cp if cp >= 0xF000 && cp <= 0xF0FF => '\u{2022}', // other PUA → bullet
+        cp if cp >= 0xF000 && cp <= 0xF0FF => DEFAULT_BULLET, // other PUA → bullet
         _ => ch,
     };
     mapped.to_string()

@@ -560,7 +560,9 @@ fn parse_path_commands_to_subpaths(
             }
             PathCommand::ArcTo(_rx, _ry, _rot, _large, _sweep, x, y) => {
                 // TODO: Proper arc-to-bezier conversion for correct geometry.
-                // Currently approximated as a single line segment.
+                // Currently approximated as a single line segment by adding the
+                // endpoint to the current subpath; the subpath rendering logic
+                // connects consecutive points to draw the line.
                 let ex = *x * scale;
                 let ey = *y * scale;
                 current_subpath.push((ex, ey));
@@ -698,6 +700,8 @@ fn render_line_to_pixels(
     width: f64,
     color: &Color,
 ) {
+    // half_w = number of pixels to expand on each side of center pixel
+    // For width=1: half_w=0 (single pixel), width=3: half_w=1 (3 pixels total), etc.
     let half_w = ((width - 1.0) / 2.0).max(0.0) as i64;
     let mut x = x1 as i64;
     let mut y = y1 as i64;

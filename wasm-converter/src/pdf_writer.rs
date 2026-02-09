@@ -1233,12 +1233,16 @@ fn path_bbox_center(commands: &[crate::converter::PathCommand], page_height: f64
         match cmd {
             crate::converter::PathCommand::MoveTo(x, y)
             | crate::converter::PathCommand::LineTo(x, y) => {
-                min_x = min_x.min(*x); min_y = min_y.min(*y);
-                max_x = max_x.max(*x); max_y = max_y.max(*y);
+                min_x = min_x.min(*x);
+                min_y = min_y.min(*y);
+                max_x = max_x.max(*x);
+                max_y = max_y.max(*y);
             }
             crate::converter::PathCommand::QuadTo(cx, cy, x, y) => {
-                min_x = min_x.min(*cx).min(*x); min_y = min_y.min(*cy).min(*y);
-                max_x = max_x.max(*cx).max(*x); max_y = max_y.max(*cy).max(*y);
+                min_x = min_x.min(*cx).min(*x);
+                min_y = min_y.min(*cy).min(*y);
+                max_x = max_x.max(*cx).max(*x);
+                max_y = max_y.max(*cy).max(*y);
             }
             crate::converter::PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
                 min_x = min_x.min(*cx1).min(*cx2).min(*x);
@@ -1247,8 +1251,10 @@ fn path_bbox_center(commands: &[crate::converter::PathCommand], page_height: f64
                 max_y = max_y.max(*cy1).max(*cy2).max(*y);
             }
             crate::converter::PathCommand::ArcTo(_, _, _, _, _, x, y) => {
-                min_x = min_x.min(*x); min_y = min_y.min(*y);
-                max_x = max_x.max(*x); max_y = max_y.max(*y);
+                min_x = min_x.min(*x);
+                min_y = min_y.min(*y);
+                max_x = max_x.max(*x);
+                max_y = max_y.max(*y);
             }
             crate::converter::PathCommand::Close => {}
         }
