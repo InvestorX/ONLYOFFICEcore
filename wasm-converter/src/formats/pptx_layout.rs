@@ -1565,7 +1565,7 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                             rotation: cur_rotation,
                             shadow: None,
                             has_3d: false,
-                            preset_geometry: None,
+                            preset_geometry: cur_preset_geom.clone(),
                             custom_path: None,
                             custom_path_viewport: None,
                             fill_image_r_id: None,
@@ -2920,20 +2920,39 @@ fn render_slide_page(
             }
 
             ShapeContent::Connector => {
-                // Draw line from top-left to bottom-right
-                let color = shape
-                    .outline
-                    .map(|(c, _)| c)
-                    .unwrap_or(Color::rgb(0, 0, 0));
-                let width = shape.outline.map(|(_, w)| w).unwrap_or(1.0);
-                page.elements.push(PageElement::Line {
-                    x1: shape.x,
-                    y1: shape.y,
-                    x2: shape.x + shape.width,
-                    y2: shape.y + shape.height,
-                    width,
-                    color,
-                });
+                // Try rendering connector using preset geometry path
+                let mut connector_rendered = false;
+                if let Some(ref geom_name) = shape.preset_geometry {
+                    if let Some(path_cmds) = generate_preset_path(geom_name, shape.x, shape.y, shape.width, shape.height) {
+                        let (stroke_color, stroke_w) = shape.outline.map_or(
+                            (Some(Color::BLACK), 1.0),
+                            |(c, w)| (Some(c), w),
+                        );
+                        page.elements.push(PageElement::Path {
+                            commands: path_cmds,
+                            fill: None,
+                            stroke: stroke_color,
+                            stroke_width: stroke_w,
+                        });
+                        connector_rendered = true;
+                    }
+                }
+                if !connector_rendered {
+                    // Fallback: draw line from top-left to bottom-right
+                    let color = shape
+                        .outline
+                        .map(|(c, _)| c)
+                        .unwrap_or(Color::rgb(0, 0, 0));
+                    let width = shape.outline.map(|(_, w)| w).unwrap_or(1.0);
+                    page.elements.push(PageElement::Line {
+                        x1: shape.x,
+                        y1: shape.y,
+                        x2: shape.x + shape.width,
+                        y2: shape.y + shape.height,
+                        width,
+                        color,
+                    });
+                }
             }
 
             ShapeContent::Empty => {

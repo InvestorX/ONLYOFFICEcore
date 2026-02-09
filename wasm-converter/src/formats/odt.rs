@@ -150,8 +150,8 @@ fn parse_odt_content(xml: &str) -> Vec<String> {
         buf.clear();
     }
 
-    // 空行のみの段落をフィルタリング（先頭・末尾の空段落を除去）
-    paragraphs
+    // 空行のみの段落をフィルタリング
+    paragraphs.into_iter().filter(|p| !p.trim().is_empty()).collect()
 }
 
 /// ODTメタデータを読み取る

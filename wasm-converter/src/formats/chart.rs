@@ -69,6 +69,7 @@ pub fn render_chart(
                     fill: Some(Color::rgb(245, 245, 245)),
                     stroke: Some(Color::rgb(200, 200, 200)),
                     stroke_width: 1.0,
+                    rotation_deg: 0.0,
                 },
                 PageElement::Text {
                     x: x + 10.0,
@@ -280,6 +281,7 @@ fn render_chart_def(
         fill: Some(Color::WHITE),
         stroke: Some(Color::rgb(200, 200, 200)),
         stroke_width: 0.5,
+        rotation_deg: 0.0,
     });
 
     let margin = 20.0;
@@ -413,6 +415,7 @@ fn render_bar_chart(
                         fill: Some(ser.color),
                         stroke: None,
                         stroke_width: 0.0,
+                        rotation_deg: 0.0,
                     });
                 }
             }
@@ -433,6 +436,7 @@ fn render_bar_chart(
                         fill: Some(ser.color),
                         stroke: None,
                         stroke_width: 0.0,
+                        rotation_deg: 0.0,
                     });
                 }
             }
@@ -482,6 +486,7 @@ fn render_pie_chart(
                 fill: Some(Color::rgb(150, 150, 150)),
                 stroke: None,
                 stroke_width: 0.0,
+                rotation_deg: 0.0,
             });
         }
     }
@@ -543,6 +548,7 @@ fn render_pie_chart(
                         fill: Some(color),
                         stroke: None,
                         stroke_width: 0.0,
+                        rotation_deg: 0.0,
                     });
                 }
             }
@@ -577,6 +583,7 @@ fn render_pie_chart(
         fill: None,
         stroke: Some(Color::rgb(100, 100, 100)),
         stroke_width: 0.5,
+        rotation_deg: 0.0,
     });
 }
 
@@ -652,6 +659,7 @@ fn render_area_chart(
                 fill: Some(color_fill),
                 stroke: None,
                 stroke_width: 0.0,
+                rotation_deg: 0.0,
             });
         }
 
@@ -755,6 +763,7 @@ fn render_line_chart(
                 fill: Some(ser.color),
                 stroke: Some(Color::WHITE),
                 stroke_width: 1.0,
+                rotation_deg: 0.0,
             });
         }
     }
@@ -776,6 +785,7 @@ fn render_legend(
             fill: Some(ser.color),
             stroke: None,
             stroke_width: 0.0,
+            rotation_deg: 0.0,
         });
         // Label
         elements.push(PageElement::Text {

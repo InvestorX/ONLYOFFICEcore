@@ -553,16 +553,11 @@ fn parse_path_commands_to_subpaths(
                 cy = ey;
             }
             PathCommand::ArcTo(_rx, _ry, _rot, _large, _sweep, x, y) => {
-                // Approximate arc as line segments
+                // TODO: Proper arc-to-bezier conversion for correct geometry.
+                // Currently approximated as a single line segment.
                 let ex = *x * scale;
                 let ey = *y * scale;
-                let steps = 12;
-                for i in 1..=steps {
-                    let t = i as f64 / steps as f64;
-                    let px = cx + (ex - cx) * t;
-                    let py = cy + (ey - cy) * t;
-                    current_subpath.push((px, py));
-                }
+                current_subpath.push((ex, ey));
                 cx = ex;
                 cy = ey;
             }
@@ -594,7 +589,7 @@ fn render_path_to_pixels(
     commands: &[crate::converter::PathCommand],
     fill: Option<&Color>,
     stroke: Option<&Color>,
-    _stroke_width: f64,
+    stroke_width: f64,
     scale: f64,
 ) {
     // Parse path commands into separate subpaths using helper function
@@ -671,13 +666,14 @@ fn render_path_to_pixels(
 
     // Stroke each subpath
     if let Some(stroke_color) = stroke {
+        let scaled_width = (stroke_width * scale).max(1.0);
         for subpath in &subpaths {
             for i in 0..subpath.len().saturating_sub(1) {
                 let (x1, y1) = subpath[i];
                 let (x2, y2) = subpath[i + 1];
                 render_line_to_pixels(
                     pixels, img_width, img_height,
-                    x1, y1, x2, y2, 1.0, stroke_color,
+                    x1, y1, x2, y2, scaled_width, stroke_color,
                 );
             }
         }
@@ -693,9 +689,10 @@ fn render_line_to_pixels(
     y1: f64,
     x2: f64,
     y2: f64,
-    _width: f64,
+    width: f64,
     color: &Color,
 ) {
+    let half_w = ((width - 1.0) / 2.0).max(0.0) as i64;
     let mut x = x1 as i64;
     let mut y = y1 as i64;
     let dx = ((x2 - x1) as i64).abs();
@@ -707,11 +704,26 @@ fn render_line_to_pixels(
     let end_x = x2 as i64;
     let end_y = y2 as i64;
 
+    // For thick lines, determine perpendicular expansion direction
+    let is_steep = dx.unsigned_abs() < dy.unsigned_abs();
+
     // Limit iterations to avoid infinite loops on huge coordinates
     const MAX_LINE_ITERATIONS: usize = 100_000;
     let max_iter = (dx.unsigned_abs() + dy.unsigned_abs() + 2) as usize;
     for _ in 0..max_iter.min(MAX_LINE_ITERATIONS) {
-        if x >= 0 && y >= 0 && (x as u32) < img_width && (y as u32) < img_height {
+        // Draw a perpendicular brush for width > 1
+        if half_w > 0 {
+            for offset in -half_w..=half_w {
+                let (px, py) = if is_steep {
+                    (x + offset, y)
+                } else {
+                    (x, y + offset)
+                };
+                if px >= 0 && py >= 0 && (px as u32) < img_width && (py as u32) < img_height {
+                    set_pixel(pixels, img_width, px as u32, py as u32, color);
+                }
+            }
+        } else if x >= 0 && y >= 0 && (x as u32) < img_width && (y as u32) < img_height {
             set_pixel(pixels, img_width, x as u32, y as u32, color);
         }
         if x == end_x && y == end_y {
