@@ -12,6 +12,7 @@ wasm-opt = false
 [features]
 default = []
 embed-fonts = []
+diagnostics = []
 
 [lib]
 crate-type = ["cdylib", "rlib"]

@@ -9,6 +9,19 @@ use crate::converter::{
     Metadata, Page, PageElement, PathCommand, TextAlign,
 };
 
+/// Diagnostic warning macro - only active when diagnostics feature is enabled
+#[cfg(all(target_arch = "wasm32", feature = "diagnostics"))]
+macro_rules! diag_warn {
+    ($($arg:tt)*) => {
+        web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&format!($($arg)*)));
+    };
+}
+
+#[cfg(not(all(target_arch = "wasm32", feature = "diagnostics")))]
+macro_rules! diag_warn {
+    ($($arg:tt)*) => {};
+}
+
 /// EMU (English Metric Unit) → ポイント変換定数
 /// 1インチ = 914400 EMU = 72 pt
 const EMU_PER_PT: f64 = 914400.0 / 72.0;
@@ -2656,12 +2669,6 @@ fn render_slide_page(
                 // Try path-based rendering for non-trivial geometries
                 if let Some(ref geom_name) = shape.preset_geometry {
                     if geom_name != "rect" && geom_name != "ellipse" {
-                        // Log preset geometry for debugging
-                        #[cfg(target_arch = "wasm32")]
-                        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(
-                            &format!("Rendering preset geometry: {}", geom_name)
-                        ));
-
                         // まず複数パス版を試す（サブパスを持つジオメトリ用）
                         if let Some(path_groups) = generate_preset_paths(geom_name, shape.x, shape.y, shape.width, shape.height) {
                             let fill_color = match &shape.fill {
@@ -2686,11 +2693,6 @@ fn render_slide_page(
                         // 次に単一パス版を試す
                         if !shape_rendered {
                             if let Some(path_cmds) = generate_preset_path(geom_name, shape.x, shape.y, shape.width, shape.height) {
-                                #[cfg(target_arch = "wasm32")]
-                                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(
-                                    &format!("Rendered {} as single-path geometry", geom_name)
-                                ));
-
                                 // Handle image fill for preset geometries
                                 if let Some(ShapeFill::Image { data, mime_type }) = &shape.fill {
                                     let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
@@ -2719,10 +2721,7 @@ fn render_slide_page(
                                 shape_rendered = true;
                             } else {
                                 // Geometry not implemented - log warning
-                                #[cfg(target_arch = "wasm32")]
-                                web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(
-                                    &format!("Preset geometry '{}' not implemented, shape will not render fill/stroke", geom_name)
-                                ));
+                                diag_warn!("Preset geometry '{}' not implemented, shape will not render fill/stroke", geom_name);
                             }
                         }
                     }
@@ -3021,11 +3020,6 @@ fn render_slide_page(
                 // Try rendering connector using preset geometry path
                 let mut connector_rendered = false;
                 if let Some(ref geom_name) = shape.preset_geometry {
-                    #[cfg(target_arch = "wasm32")]
-                    web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(
-                        &format!("Rendering connector: {}", geom_name)
-                    ));
-
                     if let Some(path_cmds) = generate_preset_path(geom_name, shape.x, shape.y, shape.width, shape.height) {
                         let (stroke_color, stroke_w) = shape.outline.map_or(
                             (Some(Color::BLACK), 1.0),
