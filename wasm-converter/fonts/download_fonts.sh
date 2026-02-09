@@ -20,7 +20,7 @@ echo "日本語フォントをダウンロード中..."
 if [ ! -f "NotoSansJP-Regular.ttf" ]; then
     echo "  Noto Sans JP Regular をダウンロード中..."
     curl -L -o "NotoSansJP-Regular.ttf" \
-        "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf" \
+        "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf" \
         2>/dev/null || echo "  ダウンロード失敗: NotoSansJP-Regular.ttf"
 fi
 
@@ -28,7 +28,7 @@ fi
 if [ ! -f "NotoSansJP-Bold.ttf" ]; then
     echo "  Noto Sans JP Bold をダウンロード中..."
     curl -L -o "NotoSansJP-Bold.ttf" \
-        "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Bold.otf" \
+        "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf" \
         2>/dev/null || echo "  ダウンロード失敗: NotoSansJP-Bold.ttf"
 fi
 
@@ -36,7 +36,7 @@ fi
 if [ ! -f "NotoSerifJP-Regular.ttf" ]; then
     echo "  Noto Serif JP Regular をダウンロード中..."
     curl -L -o "NotoSerifJP-Regular.ttf" \
-        "https://github.com/googlefonts/noto-cjk/raw/main/Serif/OTF/Japanese/NotoSerifCJKjp-Regular.otf" \
+        "https://github.com/google/fonts/raw/main/ofl/notoserifjp/NotoSerifJP%5Bwght%5D.ttf" \
         2>/dev/null || echo "  ダウンロード失敗: NotoSerifJP-Regular.ttf"
 fi
 

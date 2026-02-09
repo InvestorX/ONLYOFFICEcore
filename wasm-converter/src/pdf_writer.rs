@@ -71,8 +71,8 @@ impl<'a> PdfWriter<'a> {
         // CIDToGIDMap用のID
         let cid_to_gid_map_id = self.alloc_id();
 
-        // フォント埋め込み用のID（フォントデータがある場合）
-        let font_file_id = if has_font {
+        // フォント埋め込み用のID（パース可能なフォントデータがある場合のみ）
+        let font_file_id = if usable_font_data.is_some() {
             Some(self.alloc_id())
         } else {
             None
@@ -1088,12 +1088,12 @@ impl<'a> PdfWriter<'a> {
         output.extend_from_slice(b"0000000000 65535 f \n");
 
         for id in 1..max_id {
-            let offset = offsets
-                .iter()
-                .find(|(oid, _)| *oid == id)
-                .map(|(_, off)| *off)
-                .unwrap_or(0);
-            output.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+            if let Some((_, off)) = offsets.iter().find(|(oid, _)| *oid == id) {
+                output.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes());
+            } else {
+                // オブジェクトが存在しないIDはfree(f)エントリとして出力
+                output.extend_from_slice(b"0000000000 00000 f \n");
+            }
         }
 
         // トレーラー

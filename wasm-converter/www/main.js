@@ -50,20 +50,31 @@ function updateFontList() {
         const fonts = JSON.parse(converter.listFonts());
         const hasAny = converter.hasAnyFont();
         const extCount = converter.externalFontCount();
-        let html = '';
+        // DOM XSS防止: textContentを使用してフォント名を安全に埋め込む
+        fontList.textContent = '';
         if (fonts.length > 0) {
-            html += '<div style="font-size: 0.85rem; margin-bottom: 0.5rem;">';
-            html += `<strong>読み込み済みフォント (${fonts.length}件, 外部: ${extCount}件):</strong>`;
-            html += '</div>';
-            html += '<div style="display: flex; flex-wrap: wrap; gap: 0.5rem;">';
+            const header = document.createElement('div');
+            header.style.cssText = 'font-size: 0.85rem; margin-bottom: 0.5rem;';
+            const strong = document.createElement('strong');
+            strong.textContent = `読み込み済みフォント (${fonts.length}件, 外部: ${extCount}件):`;
+            header.appendChild(strong);
+            fontList.appendChild(header);
+
+            const container = document.createElement('div');
+            container.style.cssText = 'display: flex; flex-wrap: wrap; gap: 0.5rem;';
             fonts.forEach(name => {
-                html += `<span style="background: #e2e8f0; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.8rem;">${name}</span>`;
+                const span = document.createElement('span');
+                span.style.cssText = 'background: #e2e8f0; padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.8rem;';
+                span.textContent = name;
+                container.appendChild(span);
             });
-            html += '</div>';
+            fontList.appendChild(container);
         } else {
-            html = '<p style="font-size: 0.85rem; color: var(--text-muted);">フォント未読み込み（外部フォントを追加すると描画品質が向上します）</p>';
+            const p = document.createElement('p');
+            p.style.cssText = 'font-size: 0.85rem; color: var(--text-muted);';
+            p.textContent = 'フォント未読み込み（外部フォントを追加すると描画品質が向上します）';
+            fontList.appendChild(p);
         }
-        fontList.innerHTML = html;
     } catch (e) {
         console.error('Font list error:', e);
     }
@@ -98,8 +109,8 @@ async function loadFontFile(file) {
         return;
     }
     const ext = file.name.split('.').pop().toLowerCase();
-    if (!['ttf', 'otf', 'woff', 'woff2'].includes(ext)) {
-        showStatus(`フォントファイル形式が不正です: ${file.name}`, 'error');
+    if (!['ttf', 'otf'].includes(ext)) {
+        showStatus(`フォントファイル形式が不正です（TTF/OTFのみ対応）: ${file.name}`, 'error');
         return;
     }
     try {
