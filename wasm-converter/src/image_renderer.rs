@@ -76,6 +76,7 @@ pub fn render_page_to_image(
                 fill,
                 stroke,
                 stroke_width,
+                rotation_deg: _,
             } => {
                 render_rect_to_pixels(
                     &mut pixels,
@@ -97,6 +98,7 @@ pub fn render_page_to_image(
                 height: h,
                 stops,
                 gradient_type,
+                rotation_deg: _,
             } => {
                 render_gradient_rect_to_pixels(
                     &mut pixels,
@@ -118,6 +120,7 @@ pub fn render_page_to_image(
                 fill,
                 stroke: _,
                 stroke_width: _,
+                rotation_deg: _,
             } => {
                 if let Some(fill_color) = fill {
                     render_ellipse_to_pixels(
@@ -141,6 +144,7 @@ pub fn render_page_to_image(
                 mime_type,
                 stroke,
                 stroke_width,
+                rotation_deg: _,
             } => {
                 render_ellipse_image_to_pixels(
                     &mut pixels,
@@ -215,6 +219,7 @@ pub fn render_page_to_image(
                 fill,
                 stroke,
                 stroke_width,
+                rotation_deg: _,
             } => {
                 render_path_to_pixels(
                     &mut pixels, width, height,
@@ -227,6 +232,7 @@ pub fn render_page_to_image(
                 mime_type,
                 stroke,
                 stroke_width,
+                rotation_deg: _,
             } => {
                 // First render the clipped image
                 render_path_image_to_pixels(

@@ -301,6 +301,7 @@ impl<'a> PdfWriter<'a> {
                     fill,
                     stroke,
                     stroke_width,
+                    rotation_deg,
                 } => {
                     let py = page.height - y - height;
                     if let Some(fill_color) = fill {
@@ -362,6 +363,7 @@ impl<'a> PdfWriter<'a> {
                     height: h,
                     stops,
                     gradient_type,
+                    rotation_deg,
                 } => {
                     // Approximate gradient with multiple thin strips
                     self.render_gradient_rect(
@@ -376,6 +378,7 @@ impl<'a> PdfWriter<'a> {
                     fill,
                     stroke,
                     stroke_width,
+                    rotation_deg,
                 } => {
                     self.render_ellipse(
                         &mut stream, *cx, *cy, *rx, *ry, fill, stroke, *stroke_width,
@@ -391,6 +394,7 @@ impl<'a> PdfWriter<'a> {
                     mime_type: _,
                     stroke,
                     stroke_width,
+                    rotation_deg,
                 } => {
                     // 楕円領域に画像XObjectを配置
                     let img_x = *cx - *rx;
@@ -429,6 +433,7 @@ impl<'a> PdfWriter<'a> {
                     fill,
                     stroke,
                     stroke_width,
+                    rotation_deg,
                 } => {
                     self.render_path(
                         &mut stream, commands, fill, stroke, *stroke_width, page.height,
@@ -440,6 +445,7 @@ impl<'a> PdfWriter<'a> {
                     mime_type: _,
                     stroke,
                     stroke_width,
+                    rotation_deg,
                 } => {
                     // パスのバウンディングボックスに画像XObjectを配置
                     let mut min_x = f64::INFINITY;

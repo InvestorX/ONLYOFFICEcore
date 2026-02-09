@@ -2440,6 +2440,7 @@ fn render_slide_page(
                 fill: Some(*color),
                 stroke: None,
                 stroke_width: 0.0,
+                rotation_deg: 0.0,
             });
         }
         Some(SlideBg::Gradient { stops, angle }) => {
@@ -2450,6 +2451,7 @@ fn render_slide_page(
                 height: slide_size.height,
                 stops: stops.clone(),
                 gradient_type: GradientType::Linear(*angle),
+                rotation_deg: 0.0,
             });
         }
         Some(SlideBg::Image { data, mime_type }) => {
@@ -2482,6 +2484,7 @@ fn render_slide_page(
                 }),
                 stroke: None,
                 stroke_width: 0.0,
+                rotation_deg: 0.0,
             });
         }
 
@@ -2512,6 +2515,7 @@ fn render_slide_page(
                         fill: Some(dark_color),
                         stroke: None,
                         stroke_width: 0.0,
+                        rotation_deg: 0.0,
                     });
                     // Right depth strip
                     page.elements.push(PageElement::Rect {
@@ -2522,6 +2526,7 @@ fn render_slide_page(
                         fill: Some(dark_color),
                         stroke: None,
                         stroke_width: 0.0,
+                        rotation_deg: 0.0,
                     });
                 }
 
@@ -2563,6 +2568,7 @@ fn render_slide_page(
                                 mime_type: mime_type.clone(),
                                 stroke: stroke_color,
                                 stroke_width: stroke_w,
+                                rotation_deg: shape.rotation,
                             });
                         } else {
                             let fill_color = match &shape.fill {
@@ -2575,6 +2581,7 @@ fn render_slide_page(
                                 fill: fill_color,
                                 stroke: stroke_color,
                                 stroke_width: stroke_w,
+                                rotation_deg: shape.rotation,
                             });
                         }
                         shape_rendered = true;
@@ -2600,6 +2607,7 @@ fn render_slide_page(
                                     fill,
                                     stroke: stroke_color,
                                     stroke_width: stroke_w,
+                                    rotation_deg: shape.rotation,
                                 });
                             }
                             shape_rendered = true;
@@ -2616,6 +2624,7 @@ fn render_slide_page(
                                         mime_type: mime_type.clone(),
                                         stroke: stroke_color,
                                         stroke_width: stroke_w,
+                                        rotation_deg: shape.rotation,
                                     });
                                 } else {
                                     let fill_color = match &shape.fill {
@@ -2628,6 +2637,7 @@ fn render_slide_page(
                                         fill: fill_color,
                                         stroke: stroke_color,
                                         stroke_width: stroke_w,
+                                        rotation_deg: shape.rotation,
                                     });
                                 }
                                 shape_rendered = true;
@@ -2656,6 +2666,7 @@ fn render_slide_page(
                                 mime_type: mime_type.clone(),
                                 stroke: stroke_info.map(|(c, _)| c),
                                 stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
+                                rotation_deg: shape.rotation,
                             });
                             shape_rendered = true;
                         } else {
@@ -2673,6 +2684,7 @@ fn render_slide_page(
                                 fill: fill_color,
                                 stroke: stroke_info.map(|(c, _)| c),
                                 stroke_width: stroke_info.map_or(0.0, |(_, w)| w),
+                                rotation_deg: shape.rotation,
                             });
                             shape_rendered = true;
                         }
@@ -2688,6 +2700,7 @@ fn render_slide_page(
                                     fill: Some(*color),
                                     stroke: None,
                                     stroke_width: 0.0,
+                                    rotation_deg: shape.rotation,
                                 });
                             }
                             Some(ShapeFill::Gradient { stops, angle }) => {
@@ -2698,6 +2711,7 @@ fn render_slide_page(
                                     height: shape.height,
                                     stops: stops.clone(),
                                     gradient_type: GradientType::Linear(*angle),
+                                    rotation_deg: shape.rotation,
                                 });
                             }
                             Some(ShapeFill::Image { data, mime_type }) => {
@@ -2728,6 +2742,7 @@ fn render_slide_page(
                             fill: None,
                             stroke: Some(color),
                             stroke_width: width,
+                            rotation_deg: shape.rotation,
                         });
                     }
                 }
@@ -2903,6 +2918,7 @@ fn render_slide_page(
                     fill: Some(Color::rgb(230, 230, 230)),
                     stroke: Some(Color::rgb(180, 180, 180)),
                     stroke_width: 0.5,
+                    rotation_deg: shape.rotation,
                 });
                 page.elements.push(PageElement::Text {
                     x: shape.x + 4.0,
@@ -2933,6 +2949,7 @@ fn render_slide_page(
                             fill: None,
                             stroke: stroke_color,
                             stroke_width: stroke_w,
+                            rotation_deg: shape.rotation,
                         });
                         connector_rendered = true;
                     }
@@ -2967,6 +2984,7 @@ fn render_slide_page(
                             fill: Some(*color),
                             stroke: shape.outline.map(|(c, _)| c),
                             stroke_width: shape.outline.map(|(_, w)| w).unwrap_or(0.0),
+                            rotation_deg: shape.rotation,
                         });
                     }
                     Some(ShapeFill::Gradient { stops, angle }) => {
@@ -2977,6 +2995,7 @@ fn render_slide_page(
                             height: shape.height,
                             stops: stops.clone(),
                             gradient_type: GradientType::Linear(*angle),
+                            rotation_deg: shape.rotation,
                         });
                     }
                     Some(ShapeFill::Image { data, mime_type }) => {
@@ -2999,6 +3018,7 @@ fn render_slide_page(
                                 fill: None,
                                 stroke: Some(color),
                                 stroke_width: width,
+                                rotation_deg: shape.rotation,
                             });
                         }
                     }
