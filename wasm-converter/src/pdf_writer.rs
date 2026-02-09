@@ -304,6 +304,13 @@ impl<'a> PdfWriter<'a> {
                     rotation_deg,
                 } => {
                     let py = page.height - y - height;
+                    let has_rotation = *rotation_deg != 0.0;
+                    if has_rotation {
+                        let cx_pdf = x + width / 2.0;
+                        let cy_pdf = page.height - y - height / 2.0;
+                        stream.extend_from_slice(b"q\n");
+                        Self::write_rotation_transform(&mut stream, cx_pdf, cy_pdf, *rotation_deg);
+                    }
                     if let Some(fill_color) = fill {
                         stream.extend_from_slice(
                             format!(
@@ -335,6 +342,9 @@ impl<'a> PdfWriter<'a> {
                             .as_bytes(),
                         );
                     }
+                    if has_rotation {
+                        stream.extend_from_slice(b"Q\n");
+                    }
                 }
                 PageElement::Image {
                     x: img_x,
@@ -365,10 +375,19 @@ impl<'a> PdfWriter<'a> {
                     gradient_type,
                     rotation_deg,
                 } => {
+                    if *rotation_deg != 0.0 {
+                        let cx_pdf = x + w / 2.0;
+                        let cy_pdf = page.height - y - h / 2.0;
+                        stream.extend_from_slice(b"q\n");
+                        Self::write_rotation_transform(&mut stream, cx_pdf, cy_pdf, *rotation_deg);
+                    }
                     // Approximate gradient with multiple thin strips
                     self.render_gradient_rect(
                         &mut stream, *x, *y, *w, *h, stops, gradient_type, page.height,
                     );
+                    if *rotation_deg != 0.0 {
+                        stream.extend_from_slice(b"Q\n");
+                    }
                 }
                 PageElement::Ellipse {
                     cx,
@@ -380,10 +399,18 @@ impl<'a> PdfWriter<'a> {
                     stroke_width,
                     rotation_deg,
                 } => {
+                    if *rotation_deg != 0.0 {
+                        let cy_pdf = page.height - cy;
+                        stream.extend_from_slice(b"q\n");
+                        Self::write_rotation_transform(&mut stream, *cx, cy_pdf, *rotation_deg);
+                    }
                     self.render_ellipse(
                         &mut stream, *cx, *cy, *rx, *ry, fill, stroke, *stroke_width,
                         page.height,
                     );
+                    if *rotation_deg != 0.0 {
+                        stream.extend_from_slice(b"Q\n");
+                    }
                 }
                 PageElement::EllipseImage {
                     cx,
@@ -401,6 +428,11 @@ impl<'a> PdfWriter<'a> {
                     let img_y = *cy - *ry;
                     let img_w = *rx * 2.0;
                     let img_h = *ry * 2.0;
+                    if *rotation_deg != 0.0 {
+                        let cy_pdf = page.height - cy;
+                        stream.extend_from_slice(b"q\n");
+                        Self::write_rotation_transform(&mut stream, *cx, cy_pdf, *rotation_deg);
+                    }
                     if let Some(xobj) = image_xobjects.get(img_idx) {
                         let py = page.height - img_y - img_h;
                         stream.extend_from_slice(
@@ -419,6 +451,9 @@ impl<'a> PdfWriter<'a> {
                             page.height,
                         );
                     }
+                    if *rotation_deg != 0.0 {
+                        stream.extend_from_slice(b"Q\n");
+                    }
                 }
                 PageElement::TableBlock {
                     x,
@@ -435,9 +470,18 @@ impl<'a> PdfWriter<'a> {
                     stroke_width,
                     rotation_deg,
                 } => {
+                    if *rotation_deg != 0.0 {
+                        // Compute bounding box center for rotation
+                        let (cx_center, cy_center) = path_bbox_center(commands, page.height);
+                        stream.extend_from_slice(b"q\n");
+                        Self::write_rotation_transform(&mut stream, cx_center, cy_center, *rotation_deg);
+                    }
                     self.render_path(
                         &mut stream, commands, fill, stroke, *stroke_width, page.height,
                     );
+                    if *rotation_deg != 0.0 {
+                        stream.extend_from_slice(b"Q\n");
+                    }
                 }
                 PageElement::PathImage {
                     commands,
@@ -484,6 +528,12 @@ impl<'a> PdfWriter<'a> {
                         }
                     }
 
+                    if *rotation_deg != 0.0 {
+                        let (cx_center, cy_center) = path_bbox_center(commands, page.height);
+                        stream.extend_from_slice(b"q\n");
+                        Self::write_rotation_transform(&mut stream, cx_center, cy_center, *rotation_deg);
+                    }
+
                     if min_x < max_x && min_y < max_y {
                         if let Some(xobj) = image_xobjects.get(img_idx) {
                             let img_w = max_x - min_x;
@@ -505,6 +555,9 @@ impl<'a> PdfWriter<'a> {
                         self.render_path(
                             &mut stream, commands, &None, stroke, *stroke_width, page.height,
                         );
+                    }
+                    if *rotation_deg != 0.0 {
+                        stream.extend_from_slice(b"Q\n");
                     }
                 }
             }
@@ -784,6 +837,32 @@ impl<'a> PdfWriter<'a> {
             }
         }
         stops[0].color
+    }
+
+    /// 回転変換をPDFストリームに出力（center_x, center_y を中心に degrees 度回転）
+    /// 呼び出し前に q (save) を出力し、描画後に Q (restore) を出力すること
+    fn write_rotation_transform(
+        stream: &mut Vec<u8>,
+        center_x: f64,
+        center_y: f64,
+        degrees: f64,
+    ) {
+        let rad = -degrees * std::f64::consts::PI / 180.0;
+        let cos_a = rad.cos();
+        let sin_a = rad.sin();
+        // Translate to origin, rotate, translate back: T(cx,cy) * R(θ) * T(-cx,-cy)
+        // cm matrix: [cos sin -sin cos tx ty]
+        // tx = cx - cx*cos + cy*sin
+        // ty = cy - cx*sin - cy*cos
+        let tx = center_x - center_x * cos_a + center_y * sin_a;
+        let ty = center_y - center_x * sin_a - center_y * cos_a;
+        stream.extend_from_slice(
+            format!(
+                "{} {} {} {} {} {} cm\n",
+                cos_a, sin_a, -sin_a, cos_a, tx, ty
+            )
+            .as_bytes(),
+        );
     }
 
     /// 楕円をPDFストリームに出力（ベジェ曲線近似）
@@ -1114,6 +1193,41 @@ impl<'a> PdfWriter<'a> {
 
         output
     }
+}
+
+/// パスコマンドのバウンディングボックス中心をPDF座標系で返す
+fn path_bbox_center(commands: &[crate::converter::PathCommand], page_height: f64) -> (f64, f64) {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for cmd in commands {
+        match cmd {
+            crate::converter::PathCommand::MoveTo(x, y)
+            | crate::converter::PathCommand::LineTo(x, y) => {
+                min_x = min_x.min(*x); min_y = min_y.min(*y);
+                max_x = max_x.max(*x); max_y = max_y.max(*y);
+            }
+            crate::converter::PathCommand::QuadTo(cx, cy, x, y) => {
+                min_x = min_x.min(*cx).min(*x); min_y = min_y.min(*cy).min(*y);
+                max_x = max_x.max(*cx).max(*x); max_y = max_y.max(*cy).max(*y);
+            }
+            crate::converter::PathCommand::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
+                min_x = min_x.min(*cx1).min(*cx2).min(*x);
+                min_y = min_y.min(*cy1).min(*cy2).min(*y);
+                max_x = max_x.max(*cx1).max(*cx2).max(*x);
+                max_y = max_y.max(*cy1).max(*cy2).max(*y);
+            }
+            crate::converter::PathCommand::ArcTo(_, _, _, _, _, x, y) => {
+                min_x = min_x.min(*x); min_y = min_y.min(*y);
+                max_x = max_x.max(*x); max_y = max_y.max(*y);
+            }
+            crate::converter::PathCommand::Close => {}
+        }
+    }
+    let cx = (min_x + max_x) / 2.0;
+    let cy = page_height - (min_y + max_y) / 2.0;
+    (cx, cy)
 }
 
 /// ab_glyphでパース可能なフォントデータを見つける（フリー関数版）
