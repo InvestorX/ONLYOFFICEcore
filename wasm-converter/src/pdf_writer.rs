@@ -422,7 +422,7 @@ impl<'a> PdfWriter<'a> {
                     width,
                     table,
                 } => {
-                    self.render_table(&mut stream, *x, *y, *width, table, page.height);
+                    self.render_table(&mut stream, *x, *y, *width, table, page.height, has_font);
                 }
                 PageElement::Path {
                     commands,
@@ -523,8 +523,17 @@ impl<'a> PdfWriter<'a> {
         if text.is_empty() {
             return;
         }
-        // 制御文字（改行・タブ等）を除去してPDFテキストオペレータの破損を防止
-        let clean_text: String = text.chars().filter(|c| !c.is_control()).collect();
+        // 制御文字をサニタイズしてPDFテキストオペレータの破損を防止
+        // - 改行・復帰・タブはスペースに正規化して単語境界を保持
+        // - それ以外の制御文字は除去
+        let clean_text: String = text
+            .chars()
+            .map(|c| match c {
+                '\n' | '\r' | '\t' => ' ',
+                _ => c,
+            })
+            .filter(|c| !c.is_control())
+            .collect();
         if clean_text.is_empty() {
             return;
         }
@@ -578,6 +587,7 @@ impl<'a> PdfWriter<'a> {
         width: f64,
         table: &Table,
         page_height: f64,
+        has_font: bool,
     ) {
         let base_row_height = 20.0;
         let padding = 4.0;
@@ -589,13 +599,22 @@ impl<'a> PdfWriter<'a> {
             0.0 // 個別幅を使用
         };
 
-        // 各行の高さを事前計算（セル内の行数に基づく動的高さ）
+        // 各行の高さを事前計算（セルごとの行高見積もりの最大に基づく動的高さ）
         let row_heights: Vec<f64> = table.rows.iter().map(|row| {
-            let max_lines = row.iter().map(|cell| {
-                if cell.text.is_empty() { 1 } else { cell.text.split('\n').count().max(1) }
-            }).max().unwrap_or(1);
-            let fs = row.first().map_or(10.0, |c| c.style.font_size);
-            (fs * line_spacing * max_lines as f64 + padding * 2.0).max(base_row_height)
+            let row_max_height = row
+                .iter()
+                .map(|cell| {
+                    let lines = if cell.text.is_empty() {
+                        1
+                    } else {
+                        cell.text.split('\n').count().max(1)
+                    };
+                    let fs = cell.style.font_size;
+                    fs * line_spacing * lines as f64 + padding * 2.0
+                })
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(base_row_height);
+            row_max_height.max(base_row_height)
         }).collect();
 
         let mut row_y_offset = 0.0f64;
@@ -624,27 +643,49 @@ impl<'a> PdfWriter<'a> {
                 // セルテキスト（複数行対応）
                 if !cell.text.is_empty() {
                     let fs = cell.style.font_size;
+                    let font_name = if has_font { "F1" } else { "F2" };
                     let lines: Vec<&str> = cell.text.split('\n').collect();
                     for (line_idx, line) in lines.iter().enumerate() {
-                        if line.is_empty() {
-                            continue;
-                        }
-                        let hex_text = self.text_to_pdf_hex(line);
                         let text_y = page_height - row_y - padding - fs
                             - (line_idx as f64 * fs * line_spacing);
-                        stream.extend_from_slice(
-                            format!(
-                                "BT\n/F1 {} Tf\n{} {} {} rg\n{} {} Td\n<{}> Tj\nET\n",
-                                fs,
-                                cell.style.color.r as f64 / 255.0,
-                                cell.style.color.g as f64 / 255.0,
-                                cell.style.color.b as f64 / 255.0,
-                                cell_x + padding,
-                                text_y,
-                                hex_text
-                            )
-                            .as_bytes(),
-                        );
+                        if line.is_empty() {
+                            // 空行はYオフセットだけ進める（描画はスキップ）
+                            continue;
+                        }
+                        if has_font {
+                            let hex_text = self.text_to_pdf_hex(line);
+                            stream.extend_from_slice(
+                                format!(
+                                    "BT\n/{} {} Tf\n{} {} {} rg\n{} {} Td\n<{}> Tj\nET\n",
+                                    font_name,
+                                    fs,
+                                    cell.style.color.r as f64 / 255.0,
+                                    cell.style.color.g as f64 / 255.0,
+                                    cell.style.color.b as f64 / 255.0,
+                                    cell_x + padding,
+                                    text_y,
+                                    hex_text
+                                )
+                                .as_bytes(),
+                            );
+                        } else {
+                            let safe_text = text_to_winansi(line);
+                            let escaped = pdf_escape_string(&safe_text);
+                            stream.extend_from_slice(
+                                format!(
+                                    "BT\n/{} {} Tf\n{} {} {} rg\n{} {} Td\n({}) Tj\nET\n",
+                                    font_name,
+                                    fs,
+                                    cell.style.color.r as f64 / 255.0,
+                                    cell.style.color.g as f64 / 255.0,
+                                    cell.style.color.b as f64 / 255.0,
+                                    cell_x + padding,
+                                    text_y,
+                                    escaped
+                                )
+                                .as_bytes(),
+                            );
+                        }
                     }
                 }
 

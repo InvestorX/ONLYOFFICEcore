@@ -1383,11 +1383,11 @@ fn test_cid_to_gid_map_with_unparseable_font() {
     // PDFが正常に生成されること
     assert!(pdf.starts_with(b"%PDF"), "PDF should be generated even with bad external font");
 
-    // CIDToGIDMapストリームが含まれること（フォールバックフォントが使われる）
+    // フォールバックフォントが埋め込まれていることを確認
     let pdf_str = String::from_utf8_lossy(&pdf);
     assert!(
-        pdf_str.contains("/F1"),
-        "PDF should contain CID font reference /F1"
+        pdf_str.contains("/FontFile2"),
+        "PDF should embed fallback TrueType font (/FontFile2) when external font is unusable"
     );
 }
 
@@ -1416,11 +1416,27 @@ fn test_render_text_control_char_safety() {
     let pdf = pdf_writer::render_to_pdf_with_fonts(&doc, &fm);
     assert!(pdf.starts_with(b"%PDF"), "PDF should be valid even with control chars in text");
 
-    // 制御文字がPDFヘックス文字列に含まれないことを確認
+    // PDF 内のすべてのヘックス文字列 (<...>) を走査し、その中に 000A / 0009 が
+    // 含まれていないことを確認する
     let pdf_str = String::from_utf8_lossy(&pdf);
-    // \n = U+000A, \t = U+0009 → これらが除去されていることを確認
-    assert!(
-        !pdf_str.contains("<000A>"),
-        "PDF hex text should not contain newline character encoding"
-    );
+    let pdf_search = pdf_str.as_ref();
+    let mut pos = 0;
+    while let Some(start) = pdf_search[pos..].find('<') {
+        let start = pos + start;
+        if let Some(end) = pdf_search[start + 1..].find('>') {
+            let end = start + 1 + end;
+            let hex_segment = &pdf_search[start + 1..end];
+            assert!(
+                !hex_segment.contains("000A"),
+                "PDF hex text should not contain newline character encoding (000A) in any hex string"
+            );
+            assert!(
+                !hex_segment.contains("0009"),
+                "PDF hex text should not contain tab character encoding (0009) in any hex string"
+            );
+            pos = end + 1;
+        } else {
+            break;
+        }
+    }
 }
