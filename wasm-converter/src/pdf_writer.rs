@@ -690,20 +690,21 @@ impl<'a> PdfWriter<'a> {
         for (row_idx, row) in table.rows.iter().enumerate() {
             let row_y = y + row_y_offset;
             let rh = row_heights[row_idx];
+            let mut grid_col_idx: usize = 0; // actual grid column cursor
             let mut cell_x = x;
 
-            for (col_idx, cell) in row.iter().enumerate() {
-                let cw = get_col_w(col_idx);
-
+            for cell in row.iter() {
                 // Skip merged continuation cells (col_span=0 or row_span=0)
                 if cell.col_span == 0 || cell.row_span == 0 {
+                    let cw = get_col_w(grid_col_idx);
                     cell_x += cw;
+                    grid_col_idx += 1;
                     continue;
                 }
 
                 // Calculate merged cell width (sum of spanned columns)
                 let merged_w: f64 = (0..cell.col_span as usize)
-                    .map(|i| get_col_w(col_idx + i))
+                    .map(|i| get_col_w(grid_col_idx + i))
                     .sum();
 
                 // Calculate merged cell height (sum of spanned rows)
@@ -776,7 +777,8 @@ impl<'a> PdfWriter<'a> {
                     }
                 }
 
-                cell_x += cw;
+                cell_x += merged_w;
+                grid_col_idx += cell.col_span as usize;
             }
             row_y_offset += rh;
         }
@@ -1250,11 +1252,13 @@ fn path_bbox_center(commands: &[crate::converter::PathCommand], page_height: f64
                 max_x = max_x.max(*cx1).max(*cx2).max(*x);
                 max_y = max_y.max(*cy1).max(*cy2).max(*y);
             }
-            crate::converter::PathCommand::ArcTo(_, _, _, _, _, x, y) => {
-                min_x = min_x.min(*x);
-                min_y = min_y.min(*y);
-                max_x = max_x.max(*x);
-                max_y = max_y.max(*y);
+            crate::converter::PathCommand::ArcTo(rx, ry, _, _, _, x, y) => {
+                let rx_abs = rx.abs();
+                let ry_abs = ry.abs();
+                min_x = min_x.min(*x - rx_abs);
+                min_y = min_y.min(*y - ry_abs);
+                max_x = max_x.max(*x + rx_abs);
+                max_y = max_y.max(*y + ry_abs);
             }
             crate::converter::PathCommand::Close => {}
         }
