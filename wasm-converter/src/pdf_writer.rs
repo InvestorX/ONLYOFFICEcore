@@ -658,10 +658,20 @@ impl<'a> PdfWriter<'a> {
             0.0 // 個別幅を使用
         };
 
+        // Helper to get column width for a given column index
+        let get_col_w = |ci: usize| -> f64 {
+            if table.column_widths.is_empty() || ci >= table.column_widths.len() {
+                col_width
+            } else {
+                table.column_widths[ci]
+            }
+        };
+
         // 各行の高さを事前計算（セルごとの行高見積もりの最大に基づく動的高さ）
         let row_heights: Vec<f64> = table.rows.iter().map(|row| {
             let row_max_height = row
                 .iter()
+                .filter(|cell| cell.col_span > 0 && cell.row_span > 0)
                 .map(|cell| {
                     let lines = if cell.text.is_empty() {
                         1
@@ -683,18 +693,36 @@ impl<'a> PdfWriter<'a> {
             let mut cell_x = x;
 
             for (col_idx, cell) in row.iter().enumerate() {
-                let cw = if table.column_widths.is_empty() || col_idx >= table.column_widths.len() {
-                    col_width
-                } else {
-                    table.column_widths[col_idx]
-                };
+                let cw = get_col_w(col_idx);
+
+                // Skip merged continuation cells (col_span=0 or row_span=0)
+                if cell.col_span == 0 || cell.row_span == 0 {
+                    cell_x += cw;
+                    continue;
+                }
+
+                // Calculate merged cell width (sum of spanned columns)
+                let merged_w: f64 = (0..cell.col_span as usize)
+                    .map(|i| get_col_w(col_idx + i))
+                    .sum();
+
+                // Calculate merged cell height (sum of spanned rows)
+                let merged_h: f64 = (0..cell.row_span as usize)
+                    .map(|i| {
+                        if row_idx + i < row_heights.len() {
+                            row_heights[row_idx + i]
+                        } else {
+                            rh
+                        }
+                    })
+                    .sum();
 
                 // セル枠線
-                let py = page_height - row_y - rh;
+                let py = page_height - row_y - merged_h;
                 stream.extend_from_slice(
                     format!(
                         "0.8 0.8 0.8 RG\n0.5 w\n{} {} {} {} re\nS\n",
-                        cell_x, py, cw, rh
+                        cell_x, py, merged_w, merged_h
                     )
                     .as_bytes(),
                 );

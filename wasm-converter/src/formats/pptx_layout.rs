@@ -1348,12 +1348,13 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                     if local == b"buChar" {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"char" {
-                                cur_bullet =
-                                    Some(String::from_utf8_lossy(&attr.value).to_string());
+                                let raw = String::from_utf8_lossy(&attr.value).to_string();
+                                // Map Wingdings/Symbol PUA characters to standard Unicode equivalents
+                                cur_bullet = Some(normalize_bullet_char(&raw));
                             }
                         }
                     } else {
-                        cur_bullet = Some("•".to_string());
+                        cur_bullet = Some("\u{2022}".to_string()); // •
                     }
                 }
 
@@ -1725,6 +1726,27 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
 }
 
 /// XML要素から色を解析（テーマカラー対応版）
+/// Wingdings/Symbol等のPUA文字を標準Unicodeのbullet文字に正規化
+fn normalize_bullet_char(raw: &str) -> String {
+    let ch = raw.chars().next().unwrap_or('\u{2022}');
+    let cp = ch as u32;
+    // Wingdings PUA (F020-F0FF) and common symbol ranges
+    let mapped = match cp {
+        0xF06C | 0xF0B7 | 0xF076 => '\u{2022}', // bullet •
+        0xF06E | 0xF0A8 => '\u{25A0}',            // black square ■
+        0xF0D8 | 0xF0E0 => '\u{25B6}',            // right triangle ▶
+        0xF0FC => '\u{2713}',                       // check mark ✓
+        0xF0A7 => '\u{25CF}',                       // black circle ●
+        0xF02D => '\u{2013}',                       // en dash –
+        0xF0B2 => '\u{25C6}',                       // black diamond ◆
+        0xF0D6 => '\u{279C}',                       // right arrow ➜
+        0xF0E8 => '\u{2605}',                       // black star ★
+        cp if cp >= 0xF000 && cp <= 0xF0FF => '\u{2022}', // other PUA → bullet
+        _ => ch,
+    };
+    mapped.to_string()
+}
+
 fn parse_color_element_themed(e: &quick_xml::events::BytesStart, theme: &ThemeColors) -> Option<Color> {
     let local = e.local_name();
     match local.as_ref() {
@@ -2228,6 +2250,10 @@ fn detect_and_render_tables(
     let mut in_tc_pr = false;
     let mut in_solid_fill = false;
     let mut tc_para_count = 0u32; // 現在のセル内の段落数
+    let mut cur_col_span = 1u32;
+    let mut cur_row_span = 1u32;
+    let mut cur_h_merge = false;
+    let mut cur_v_merge = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -2271,6 +2297,32 @@ fn detect_and_render_tables(
                         current_cell_text.clear();
                         cell_fill = None;
                         tc_para_count = 0;
+                        cur_col_span = 1;
+                        cur_row_span = 1;
+                        cur_h_merge = false;
+                        cur_v_merge = false;
+                        // Parse gridSpan and rowSpan from tc attributes
+                        for attr in e.attributes().flatten() {
+                            match attr.key.as_ref() {
+                                b"gridSpan" => {
+                                    cur_col_span = String::from_utf8_lossy(&attr.value)
+                                        .parse::<u32>()
+                                        .unwrap_or(1);
+                                }
+                                b"rowSpan" => {
+                                    cur_row_span = String::from_utf8_lossy(&attr.value)
+                                        .parse::<u32>()
+                                        .unwrap_or(1);
+                                }
+                                b"hMerge" => {
+                                    cur_h_merge = attr.value.as_ref() == b"1" || attr.value.as_ref() == b"true";
+                                }
+                                b"vMerge" => {
+                                    cur_v_merge = attr.value.as_ref() == b"1" || attr.value.as_ref() == b"true";
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     b"tcPr" if in_tc => {
                         in_tc_pr = true;
@@ -2380,11 +2432,21 @@ fn detect_and_render_tables(
                     }
                     b"tc" => {
                         if in_tc {
-                            let mut cell = TableCell::new(&current_cell_text);
-                            if let Some(c) = cell_fill {
-                                cell.style.color = c;
+                            if cur_h_merge || cur_v_merge {
+                                // Merged continuation cell - push empty cell with span=0
+                                let mut cell = TableCell::new("");
+                                cell.col_span = 0;
+                                cell.row_span = 0;
+                                current_row.push(cell);
+                            } else {
+                                let mut cell = TableCell::new(&current_cell_text);
+                                cell.col_span = cur_col_span;
+                                cell.row_span = cur_row_span;
+                                if let Some(c) = cell_fill {
+                                    cell.style.color = c;
+                                }
+                                current_row.push(cell);
                             }
-                            current_row.push(cell);
                         }
                         in_tc = false;
                         in_tc_pr = false;
