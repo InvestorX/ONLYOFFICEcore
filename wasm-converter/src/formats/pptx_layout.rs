@@ -1513,6 +1513,17 @@ fn parse_slide_shapes(xml: &str, theme_colors: &ThemeColors) -> Vec<SlideShape> 
                         in_sp = false;
                     }
                     b"pic" if in_pic && depth == shape_depth => {
+                        // Apply style-based fill/outline as fallback (p:picのp:styleにも対応)
+                        if cur_fill.is_none() {
+                            if let Some(c) = style_fill_color {
+                                cur_fill = Some(ShapeFill::Solid(c));
+                            }
+                        }
+                        if cur_outline.is_none() {
+                            if let Some(c) = style_ln_color {
+                                cur_outline = Some((c, 1.0));
+                            }
+                        }
                         let content = if !cur_r_id.is_empty() {
                             ShapeContent::Image {
                                 r_id: cur_r_id.clone(),
@@ -2573,31 +2584,54 @@ fn render_slide_page(
                 // Try path-based rendering for non-trivial geometries
                 if let Some(ref geom_name) = shape.preset_geometry {
                     if geom_name != "rect" && geom_name != "ellipse" {
-                        if let Some(path_cmds) = generate_preset_path(geom_name, shape.x, shape.y, shape.width, shape.height) {
-                            // Handle image fill for preset geometries
-                            if let Some(ShapeFill::Image { data, mime_type }) = &shape.fill {
-                                let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
-                                page.elements.push(PageElement::PathImage {
-                                    commands: path_cmds,
-                                    data: data.clone(),
-                                    mime_type: mime_type.clone(),
-                                    stroke: stroke_color,
-                                    stroke_width: stroke_w,
-                                });
-                            } else {
-                                let fill_color = match &shape.fill {
-                                    Some(ShapeFill::Solid(c)) => Some(*c),
-                                    _ => None,
-                                };
-                                let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                        // まず複数パス版を試す（サブパスを持つジオメトリ用）
+                        if let Some(path_groups) = generate_preset_paths(geom_name, shape.x, shape.y, shape.width, shape.height) {
+                            let fill_color = match &shape.fill {
+                                Some(ShapeFill::Solid(c)) => Some(*c),
+                                _ => None,
+                            };
+                            let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                            for (i, path_cmds) in path_groups.into_iter().enumerate() {
+                                // 最初のパスのみフィルを適用（サブパスはストロークのみ）
+                                // 注: smileyFaceの目など、内側パスにもフィルが必要な場合がある
+                                let fill = if i == 0 { fill_color } else { None };
                                 page.elements.push(PageElement::Path {
                                     commands: path_cmds,
-                                    fill: fill_color,
+                                    fill,
                                     stroke: stroke_color,
                                     stroke_width: stroke_w,
                                 });
                             }
                             shape_rendered = true;
+                        }
+                        // 次に単一パス版を試す
+                        if !shape_rendered {
+                            if let Some(path_cmds) = generate_preset_path(geom_name, shape.x, shape.y, shape.width, shape.height) {
+                                // Handle image fill for preset geometries
+                                if let Some(ShapeFill::Image { data, mime_type }) = &shape.fill {
+                                    let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                                    page.elements.push(PageElement::PathImage {
+                                        commands: path_cmds,
+                                        data: data.clone(),
+                                        mime_type: mime_type.clone(),
+                                        stroke: stroke_color,
+                                        stroke_width: stroke_w,
+                                    });
+                                } else {
+                                    let fill_color = match &shape.fill {
+                                        Some(ShapeFill::Solid(c)) => Some(*c),
+                                        _ => None,
+                                    };
+                                    let (stroke_color, stroke_w) = shape.outline.map_or((None, 0.0), |(c, w)| (Some(c), w));
+                                    page.elements.push(PageElement::Path {
+                                        commands: path_cmds,
+                                        fill: fill_color,
+                                        stroke: stroke_color,
+                                        stroke_width: stroke_w,
+                                    });
+                                }
+                                shape_rendered = true;
+                            }
                         }
                     }
                 }
@@ -3524,14 +3558,21 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
             ])
         }
         // Flowchart: Terminator (stadium/rounded rectangle)
+        // ArcToの代わりにキュービックベジェで半円を近似（レンダラーのArcTo対応が不完全なため）
         "flowChartTerminator" => {
             let r = h / 2.0;
+            // 半円をキュービックベジェで近似: 制御点係数 = 4/3 * tan(π/8) ≈ 0.5523
+            let k = r * 0.5523;
             Some(vec![
                 PathCommand::MoveTo(x + r, y),
                 PathCommand::LineTo(x + w - r, y),
-                PathCommand::ArcTo(r, r, 0.0, false, true, x + w - r, y + h),
+                // 右側半円（上→下）
+                PathCommand::CubicTo(x + w - r + k, y, x + w, y + r - k, x + w, y + r),
+                PathCommand::CubicTo(x + w, y + r + k, x + w - r + k, y + h, x + w - r, y + h),
                 PathCommand::LineTo(x + r, y + h),
-                PathCommand::ArcTo(r, r, 0.0, false, true, x + r, y),
+                // 左側半円（下→上）
+                PathCommand::CubicTo(x + r - k, y + h, x, y + r + k, x, y + r),
+                PathCommand::CubicTo(x, y + r - k, x + r - k, y, x + r, y),
                 PathCommand::Close,
             ])
         }
@@ -3552,23 +3593,8 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
             cmds.push(PathCommand::Close);
             Some(cmds)
         }
-        // Flowchart: Predefined Process (rectangle with double vertical lines)
-        "flowChartPredefinedProcess" => {
-            let margin = w * 0.1;
-            Some(vec![
-                PathCommand::MoveTo(x, y),
-                PathCommand::LineTo(x + w, y),
-                PathCommand::LineTo(x + w, y + h),
-                PathCommand::LineTo(x, y + h),
-                PathCommand::Close,
-                // Left vertical line
-                PathCommand::MoveTo(x + margin, y),
-                PathCommand::LineTo(x + margin, y + h),
-                // Right vertical line
-                PathCommand::MoveTo(x + w - margin, y),
-                PathCommand::LineTo(x + w - margin, y + h),
-            ])
-        }
+        // Flowchart: Predefined Process → generate_preset_paths() で複数パスとして出力
+        "flowChartPredefinedProcess" => None,
         // Flowchart: Input/Output (parallelogram)
         "flowChartInputOutput" => {
             let offset = w * 0.2;
@@ -3646,7 +3672,7 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
                 PathCommand::Close,
             ])
         }
-        // Flowchart: Sort (diamond with crossing lines)
+        // Flowchart: Sort (diamond with horizontal divider)
         "flowChartSort" => {
             Some(vec![
                 // Outer diamond
@@ -3655,7 +3681,7 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
                 PathCommand::LineTo(x + w / 2.0, y + h),
                 PathCommand::LineTo(x, y + h / 2.0),
                 PathCommand::Close,
-                // Horizontal line
+                // Horizontal divider line
                 PathCommand::MoveTo(x, y + h / 2.0),
                 PathCommand::LineTo(x + w, y + h / 2.0),
             ])
@@ -3679,15 +3705,20 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
             ])
         }
         // Flowchart: Delay (semi-circle on right side)
+        // 半円の中心と半径をバウンディングボックス内に収める
         "flowChartDelay" => {
+            let rx = h / 2.0; // 半円の半径（高さの半分）
+            let cx_arc = x + w - rx; // 半円の中心X（右端から半径分左）
             let steps = 24;
             let mut cmds = vec![PathCommand::MoveTo(x, y)];
+            cmds.push(PathCommand::LineTo(cx_arc, y));
             for i in 0..=steps {
                 let angle = -PI / 2.0 + PI * i as f64 / steps as f64;
-                let px = x + w + (w * 0.2) * angle.cos();
+                let px = cx_arc + rx * angle.cos();
                 let py = y + h / 2.0 + (h / 2.0) * angle.sin();
                 cmds.push(PathCommand::LineTo(px, py));
             }
+            cmds.push(PathCommand::LineTo(cx_arc, y + h));
             cmds.push(PathCommand::LineTo(x, y + h));
             cmds.push(PathCommand::Close);
             Some(cmds)
@@ -3817,62 +3848,8 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
             cmds.push(PathCommand::Close);
             Some(cmds)
         }
-        // Special Shapes: Smiley Face
-        "smileyFace" => {
-            let cx = x + w / 2.0;
-            let cy = y + h / 2.0;
-            let r = w.min(h) / 2.0;
-            let steps = 48;
-            let mut cmds = Vec::new();
-            // Face circle
-            for i in 0..=steps {
-                let angle = 2.0 * PI * i as f64 / steps as f64;
-                let px = cx + r * angle.cos();
-                let py = cy + r * angle.sin();
-                if i == 0 {
-                    cmds.push(PathCommand::MoveTo(px, py));
-                } else {
-                    cmds.push(PathCommand::LineTo(px, py));
-                }
-            }
-            cmds.push(PathCommand::Close);
-            // Left eye
-            let eye_r = r * 0.08;
-            let eye_y = cy - r * 0.25;
-            for i in 0..=steps / 4 {
-                let angle = 2.0 * PI * i as f64 / (steps / 4) as f64;
-                let px = cx - r * 0.3 + eye_r * angle.cos();
-                let py = eye_y + eye_r * angle.sin();
-                if i == 0 {
-                    cmds.push(PathCommand::MoveTo(px, py));
-                } else {
-                    cmds.push(PathCommand::LineTo(px, py));
-                }
-            }
-            cmds.push(PathCommand::Close);
-            // Right eye
-            for i in 0..=steps / 4 {
-                let angle = 2.0 * PI * i as f64 / (steps / 4) as f64;
-                let px = cx + r * 0.3 + eye_r * angle.cos();
-                let py = eye_y + eye_r * angle.sin();
-                if i == 0 {
-                    cmds.push(PathCommand::MoveTo(px, py));
-                } else {
-                    cmds.push(PathCommand::LineTo(px, py));
-                }
-            }
-            cmds.push(PathCommand::Close);
-            // Smile
-            cmds.push(PathCommand::MoveTo(cx - r * 0.4, cy + r * 0.1));
-            for i in 0..=steps / 4 {
-                let t = i as f64 / (steps / 4) as f64;
-                let angle = PI * 0.2 + PI * 0.6 * t;
-                let px = cx + r * 0.4 * angle.cos();
-                let py = cy + r * 0.4 * angle.sin();
-                cmds.push(PathCommand::LineTo(px, py));
-            }
-            Some(cmds)
-        }
+        // Special Shapes: Smiley Face → generate_preset_paths() で複数パスとして出力
+        "smileyFace" => None,
         // Special Shapes: Sun (circle with rays)
         "sun" => {
             let cx = x + w / 2.0;
@@ -3950,24 +3927,8 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
                 PathCommand::Close,
             ])
         }
-        // Special Shapes: Frame (hollow rectangle)
-        "frame" => {
-            let thickness = w.min(h) * 0.15;
-            Some(vec![
-                // Outer rectangle
-                PathCommand::MoveTo(x, y),
-                PathCommand::LineTo(x + w, y),
-                PathCommand::LineTo(x + w, y + h),
-                PathCommand::LineTo(x, y + h),
-                PathCommand::Close,
-                // Inner rectangle (reverse direction for hole)
-                PathCommand::MoveTo(x + thickness, y + thickness),
-                PathCommand::LineTo(x + thickness, y + h - thickness),
-                PathCommand::LineTo(x + w - thickness, y + h - thickness),
-                PathCommand::LineTo(x + w - thickness, y + thickness),
-                PathCommand::Close,
-            ])
-        }
+        // Special Shapes: Frame → generate_preset_paths() で複数パスとして出力
+        "frame" => None,
         // Special Shapes: Bevel (3D beveled rectangle)
         "bevel" => {
             let bevel = w.min(h) * 0.12;
@@ -4093,7 +4054,129 @@ pub fn generate_preset_path(name: &str, x: f64, y: f64, w: f64, h: f64) -> Optio
     }
 }
 
-/// PPTXメタデータを読み取る
+/// 複数のサブパスを持つプリセットジオメトリを生成
+/// ラスタレンダラーがサブパス（パス内の複数のMoveTo-Close単位）を正しく処理できないため、
+/// 別々のパス要素として返す必要があるジオメトリ用
+pub fn generate_preset_paths(name: &str, x: f64, y: f64, w: f64, h: f64) -> Option<Vec<Vec<crate::converter::PathCommand>>> {
+    use crate::converter::PathCommand;
+    use std::f64::consts::PI;
+
+    match name {
+        // Flowchart: Predefined Process - 外枠 + 内側の垂直線を別パスで出力
+        "flowChartPredefinedProcess" => {
+            let margin = w * 0.1;
+            Some(vec![
+                // 外枠の矩形
+                vec![
+                    PathCommand::MoveTo(x, y),
+                    PathCommand::LineTo(x + w, y),
+                    PathCommand::LineTo(x + w, y + h),
+                    PathCommand::LineTo(x, y + h),
+                    PathCommand::Close,
+                ],
+                // 左側の垂直線
+                vec![
+                    PathCommand::MoveTo(x + margin, y),
+                    PathCommand::LineTo(x + margin, y + h),
+                ],
+                // 右側の垂直線
+                vec![
+                    PathCommand::MoveTo(x + w - margin, y),
+                    PathCommand::LineTo(x + w - margin, y + h),
+                ],
+            ])
+        }
+        // Special Shapes: Smiley Face - 顔の輪郭と目・口を別パスで出力
+        "smileyFace" => {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let r = w.min(h) / 2.0;
+            let steps = 48;
+
+            // 顔の輪郭
+            let mut face = Vec::new();
+            for i in 0..=steps {
+                let angle = 2.0 * PI * i as f64 / steps as f64;
+                let px = cx + r * angle.cos();
+                let py = cy + r * angle.sin();
+                if i == 0 {
+                    face.push(PathCommand::MoveTo(px, py));
+                } else {
+                    face.push(PathCommand::LineTo(px, py));
+                }
+            }
+            face.push(PathCommand::Close);
+
+            // 左目
+            let eye_r = r * 0.08;
+            let eye_y = cy - r * 0.25;
+            let eye_steps = steps / 4;
+            let mut left_eye = Vec::new();
+            for i in 0..=eye_steps {
+                let angle = 2.0 * PI * i as f64 / eye_steps as f64;
+                let px = cx - r * 0.3 + eye_r * angle.cos();
+                let py = eye_y + eye_r * angle.sin();
+                if i == 0 {
+                    left_eye.push(PathCommand::MoveTo(px, py));
+                } else {
+                    left_eye.push(PathCommand::LineTo(px, py));
+                }
+            }
+            left_eye.push(PathCommand::Close);
+
+            // 右目
+            let mut right_eye = Vec::new();
+            for i in 0..=eye_steps {
+                let angle = 2.0 * PI * i as f64 / eye_steps as f64;
+                let px = cx + r * 0.3 + eye_r * angle.cos();
+                let py = eye_y + eye_r * angle.sin();
+                if i == 0 {
+                    right_eye.push(PathCommand::MoveTo(px, py));
+                } else {
+                    right_eye.push(PathCommand::LineTo(px, py));
+                }
+            }
+            right_eye.push(PathCommand::Close);
+
+            // 口（スマイル弧）
+            let mut smile = Vec::new();
+            smile.push(PathCommand::MoveTo(cx - r * 0.4, cy + r * 0.1));
+            let smile_steps = steps / 4;
+            for i in 0..=smile_steps {
+                let t = i as f64 / smile_steps as f64;
+                let angle = PI * 0.2 + PI * 0.6 * t;
+                let px = cx + r * 0.4 * angle.cos();
+                let py = cy + r * 0.4 * angle.sin();
+                smile.push(PathCommand::LineTo(px, py));
+            }
+
+            Some(vec![face, left_eye, right_eye, smile])
+        }
+        // Special Shapes: Frame (hollow rectangle) - 外枠と内枠を別パスで出力
+        "frame" => {
+            let thickness = w.min(h) * 0.15;
+            Some(vec![
+                // 外枠
+                vec![
+                    PathCommand::MoveTo(x, y),
+                    PathCommand::LineTo(x + w, y),
+                    PathCommand::LineTo(x + w, y + h),
+                    PathCommand::LineTo(x, y + h),
+                    PathCommand::Close,
+                ],
+                // 内枠（ストロークのみ、フィルなし）
+                vec![
+                    PathCommand::MoveTo(x + thickness, y + thickness),
+                    PathCommand::LineTo(x + w - thickness, y + thickness),
+                    PathCommand::LineTo(x + w - thickness, y + h - thickness),
+                    PathCommand::LineTo(x + thickness, y + h - thickness),
+                    PathCommand::Close,
+                ],
+            ])
+        }
+        _ => None,
+    }
+}
 fn read_pptx_metadata(archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>) -> Metadata {
     let mut metadata = Metadata::default();
 
