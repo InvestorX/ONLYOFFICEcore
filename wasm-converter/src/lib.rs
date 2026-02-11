@@ -13,6 +13,46 @@ use converter::detect_format;
 use font_manager::FontManager;
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(target_arch = "wasm32", feature = "diagnostics"))]
+use web_sys::console;
+
+/// Diagnostic logging macro - only active when diagnostics feature is enabled
+#[cfg(all(target_arch = "wasm32", feature = "diagnostics"))]
+macro_rules! diag_log {
+    ($($arg:tt)*) => {
+        console::log_1(&wasm_bindgen::JsValue::from_str(&format!($($arg)*)));
+    };
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "diagnostics"))]
+macro_rules! diag_error {
+    ($($arg:tt)*) => {
+        console::error_1(&wasm_bindgen::JsValue::from_str(&format!($($arg)*)));
+    };
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "diagnostics"))]
+macro_rules! diag_warn {
+    ($($arg:tt)*) => {
+        console::warn_1(&wasm_bindgen::JsValue::from_str(&format!($($arg)*)));
+    };
+}
+
+#[cfg(not(all(target_arch = "wasm32", feature = "diagnostics")))]
+macro_rules! diag_log {
+    ($($arg:tt)*) => {};
+}
+
+#[cfg(not(all(target_arch = "wasm32", feature = "diagnostics")))]
+macro_rules! diag_error {
+    ($($arg:tt)*) => {};
+}
+
+#[cfg(not(all(target_arch = "wasm32", feature = "diagnostics")))]
+macro_rules! diag_warn {
+    ($($arg:tt)*) => {};
+}
+
 /// WASMコンバーターのメインインスタンス
 /// JavaScriptからこのオブジェクトを作成して使用します。
 #[wasm_bindgen]
@@ -94,6 +134,8 @@ impl WasmConverter {
     /// @returns PDFバイト列
     #[wasm_bindgen(js_name = convertToPdf)]
     pub fn convert_to_pdf(&self, filename: &str, data: &[u8]) -> Result<Vec<u8>, JsValue> {
+        diag_log!("Converting {} to PDF (size: {} bytes)", filename, data.len());
+
         let ext = detect_format(filename).ok_or_else(|| {
             JsValue::from_str(&format!(
                 "サポートされていないファイル形式です: {}",
@@ -101,9 +143,18 @@ impl WasmConverter {
             ))
         })?;
 
-        let doc = formats::convert_by_extension(ext, data).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let doc = formats::convert_by_extension(ext, data).map_err(|e| {
+            diag_error!("Conversion error: {}", e);
+            JsValue::from_str(&e.to_string())
+        })?;
 
-        Ok(pdf_writer::render_to_pdf_with_fonts(&doc, &self.font_manager))
+        diag_log!("Document has {} pages", doc.pages.len());
+
+        let pdf_data = pdf_writer::render_to_pdf_with_fonts(&doc, &self.font_manager);
+
+        diag_log!("PDF generation complete ({} bytes)", pdf_data.len());
+
+        Ok(pdf_data)
     }
 
     /// ファイルを画像に変換してZIPで返す

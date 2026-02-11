@@ -9,6 +9,19 @@ use crate::converter::{
     Metadata, Page, PageElement, PathCommand, TextAlign,
 };
 
+/// Diagnostic warning macro - only active when diagnostics feature is enabled
+#[cfg(all(target_arch = "wasm32", feature = "diagnostics"))]
+macro_rules! diag_warn {
+    ($($arg:tt)*) => {
+        web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&format!($($arg)*)));
+    };
+}
+
+#[cfg(not(all(target_arch = "wasm32", feature = "diagnostics")))]
+macro_rules! diag_warn {
+    ($($arg:tt)*) => {};
+}
+
 /// EMU (English Metric Unit) → ポイント変換定数
 /// 1インチ = 914400 EMU = 72 pt
 const EMU_PER_PT: f64 = 914400.0 / 72.0;
@@ -2706,6 +2719,9 @@ fn render_slide_page(
                                     });
                                 }
                                 shape_rendered = true;
+                            } else {
+                                // Geometry not implemented - log warning
+                                diag_warn!("Preset geometry '{}' not implemented, shape will not render fill/stroke", geom_name);
                             }
                         }
                     }
